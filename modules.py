@@ -1,118 +1,73 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
-# ============ 1. 编码器 ============
 class Encoder(nn.Module):
     def __init__(self, obs_dim=56, hidden=64):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(obs_dim, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, hidden),
-        )
+            nn.Linear(obs_dim, hidden), nn.GELU(), nn.Linear(hidden, hidden))
     def forward(self, x): return self.net(x)
 
-# ============ 2. C₋₁ 元目标层 ============
 class MetaGoalLayer(nn.Module):
     def __init__(self, input_dim=64, goal_dim=8):
         super().__init__()
         self.priority_head = nn.Linear(input_dim + 3, goal_dim)
-        self.goal_dim = goal_dim
-    
     def forward(self, h, curiosity, capability_gap, ext_reward):
-        signals = torch.tensor([curiosity, capability_gap, ext_reward], 
-                               dtype=torch.float32)
-        combined = torch.cat([h, signals])
-        goal = torch.tanh(self.priority_head(combined))
-        return goal
+        signals = torch.tensor([curiosity, capability_gap, ext_reward], dtype=torch.float32)
+        return torch.tanh(self.priority_head(torch.cat([h, signals])))
 
-# ============ 3. 场景感知稀疏路由 ============
 class SparseSceneRouter(nn.Module):
-    def __init__(self, input_dim=64, n_scenes=16, activation_rate=0.15):
+    def __init__(self, input_dim=64, n_scenes=16):
         super().__init__()
         self.prototypes = nn.Parameter(torch.randn(n_scenes, input_dim) * 0.02)
         self.goal_modulator = nn.Linear(8, n_scenes)
-        self.n_scenes = n_scenes
-        self.activation_rate = activation_rate
-        self.masks = nn.Parameter(torch.randn(n_scenes, input_dim) * 0.02)
-    
-    def forward(self, h, goal, tau=1.0, hard=False):
+        self.enhancements = nn.Parameter(torch.zeros(n_scenes, input_dim))
+        self.gate = nn.Linear(input_dim + 8, 1)
+    def forward(self, h, goal, tau=1.0):
         sim = F.cosine_similarity(h.unsqueeze(0), self.prototypes, dim=-1)
         goal_bias = self.goal_modulator(goal)
-        logits = sim + goal_bias
-        
-        if hard:
-            weights = F.gumbel_softmax(logits, tau=tau, hard=True)
-        else:
-            weights = F.softmax(logits / tau, dim=-1)
-        
-        combined_mask = torch.sigmoid((weights.unsqueeze(-1) * self.masks).sum(0))
-        k = max(1, int(self.activation_rate * combined_mask.shape[0]))
-        topk_val, topk_idx = combined_mask.topk(k)
-        sparse_mask = torch.zeros_like(combined_mask)
-        sparse_mask.scatter_(0, topk_idx, topk_val)
-        
-        return h * sparse_mask, weights
+        weights = F.softmax((sim + goal_bias) / tau, dim=-1)
+        enhancement = (weights.unsqueeze(-1) * self.enhancements).sum(0)
+        alpha = torch.sigmoid(self.gate(torch.cat([h, goal]))).squeeze()
+        return h + alpha * enhancement, weights
 
-# ============ 4. 门控 SSM (稳定版 Mamba 近似) ============
 class GatedSSM(nn.Module):
-    """
-    用 GRU 门控替代裸 A 矩阵递归。
-    这是 SSM 的稳定离散化——Mamba 本质上也是做这件事。
-    """
     def __init__(self, input_dim, state_dim):
         super().__init__()
-        self.state_dim = state_dim
-        # 门控参数
-        self.W_z = nn.Linear(input_dim + state_dim, state_dim)  # 遗忘门
-        self.W_r = nn.Linear(input_dim + state_dim, state_dim)  # 重置门
-        self.W_h = nn.Linear(input_dim + state_dim, state_dim)  # 候选状态
-        # ΔA 调制接口: 修改重置门的偏置
+        self.W_z = nn.Linear(input_dim + state_dim, state_dim)
+        self.W_r = nn.Linear(input_dim + state_dim, state_dim)
+        self.W_h = nn.Linear(input_dim + state_dim, state_dim)
+        self.output_proj = nn.Linear(state_dim, input_dim)
         self.delta_bias_proj = nn.Linear(state_dim, state_dim)
-    
     def forward(self, x, S, delta_A_signal=None):
         combined = torch.cat([x, S], dim=-1)
-        z = torch.sigmoid(self.W_z(combined))    # 遗忘门
-        r = torch.sigmoid(self.W_r(combined))    # 重置门
-        
-        # ΔA 调制: 影响重置门偏置 (而非直接改 A 矩阵)
-        r_bias = 0
+        z = torch.sigmoid(self.W_z(combined))
+        r = torch.sigmoid(self.W_r(combined))
         if delta_A_signal is not None:
-            r_bias = self.delta_bias_proj(delta_A_signal) * 0.1
-        r = torch.clamp(r + r_bias, 0, 1)
-        
-        combined_r = torch.cat([x, r * S], dim=-1)
-        h_hat = torch.tanh(self.W_h(combined_r))  # 候选状态
-        
+            r = torch.clamp(r + self.delta_bias_proj(delta_A_signal) * 0.1, 0, 1)
+        h_hat = torch.tanh(self.W_h(torch.cat([x, r * S], dim=-1)))
         S_new = (1 - z) * S + z * h_hat
-        return S_new, S_new  # 输出 = 新状态 (无额外输出投影, 简化)
+        return self.output_proj(S_new), S_new
 
-# ============ 5. 元认知层 S_meta ============
 class MetaCognition(nn.Module):
+    """输入: delta_S_obj(32) + action_repeat_count(1) + 3 scalars = 36"""
     def __init__(self, obj_state_dim=32, meta_state_dim=16):
         super().__init__()
-        trace_dim = obj_state_dim + 3
+        trace_dim = obj_state_dim + 1 + 3  # +1 for action_repeat
         self.trace_encoder = nn.Linear(trace_dim, meta_state_dim)
         self.meta_ssm = GatedSSM(meta_state_dim, meta_state_dim)
         self.delta_signal_proj = nn.Linear(meta_state_dim, obj_state_dim)
         self.interp_head = nn.Linear(meta_state_dim, 4)
-        self.obj_dim = obj_state_dim
-    
-    def forward(self, S_obj, pred_err, confidence, entropy, S_meta):
-        trace = torch.cat([S_obj, 
+    def forward(self, delta_S_obj, action_repeat, pred_err, confidence, entropy, S_meta):
+        trace = torch.cat([delta_S_obj, torch.tensor([action_repeat]),
                            torch.tensor([pred_err, confidence, entropy])])
         x = self.trace_encoder(trace)
-        S_meta_new, _ = self.meta_ssm(x, S_meta)
-        
-        # 生成调制信号 (注意: 不再是低秩A矩阵, 而是偏置调制)
+        _, S_meta_new = self.meta_ssm(x, S_meta)
         delta_signal = torch.tanh(self.delta_signal_proj(S_meta_new))
         interp = torch.sigmoid(self.interp_head(S_meta_new))
-        
         return delta_signal, S_meta_new, interp
 
-# ============ 6. 槽位工作记忆 ============
 class SlotMemory(nn.Module):
     def __init__(self, slot_dim=64, n_slots=4):
         super().__init__()
@@ -121,47 +76,58 @@ class SlotMemory(nn.Module):
         self.write_gate = nn.Linear(slot_dim, n_slots)
         self.read_attn = nn.Linear(slot_dim, slot_dim)
         self.empty_token = nn.Parameter(torch.zeros(slot_dim))
-    
     def init_slots(self):
         return self.empty_token.unsqueeze(0).expand(self.n_slots, -1).clone()
-    
     def forward(self, query, slots):
         q = self.read_attn(query)
         attn = F.softmax(slots @ q / (self.slot_dim**0.5), dim=0)
         read = (attn.unsqueeze(-1) * slots).sum(0)
-        
-        write_logits = self.write_gate(query)
-        write_weights = F.softmax(write_logits, dim=0)
+        write_weights = F.softmax(self.write_gate(query), dim=0)
         new_slots = slots + write_weights.unsqueeze(-1) * (query - slots) * 0.3
-        
         return read, new_slots
 
-# ============ 7. 因果图模块 ============
 class CausalGraph(nn.Module):
-    def __init__(self, n_vars=4, state_dim=64):
+    """
+    v2.1-final:
+    - 变量→变量边 (4x4 A矩阵)
+    - 动作→变量边 (6x4 B矩阵，新增!)
+    - predict_delta: Delta_v_i = struct_eq(A·parents, B·action)
+    - 只在事件步训练转移预测
+    """
+    def __init__(self, n_vars=4, n_actions=6, state_dim=64):
         super().__init__()
         self.n_vars = n_vars
+        self.n_actions = n_actions
         self.var_detector = nn.Linear(state_dim, n_vars)
+        # 变量→变量
         self.adj_logits = nn.Parameter(torch.randn(n_vars, n_vars) * 0.1)
+        # 动作→变量 (新增! 关键!)
+        self.action_adj_logits = nn.Parameter(torch.randn(n_actions, n_vars) * 0.1)
+        # 结构方程: parents(4) + action_effect(4) = 8
         self.struct_eq = nn.ModuleList([
-            nn.Linear(n_vars, 1) for _ in range(n_vars)
+            nn.Linear(n_vars + n_vars, 1) for _ in range(n_vars)
         ])
     
     def detect_vars(self, h):
         return torch.sigmoid(self.var_detector(h))
     
     def get_adj(self):
-        adj = torch.sigmoid(self.adj_logits)
-        adj = adj * (1 - torch.eye(self.n_vars))
+        adj = torch.sigmoid(self.adj_logits) * (1 - torch.eye(self.n_vars))
         return adj
     
-    def predict(self, var_probs):
+    def get_action_adj(self):
+        return torch.sigmoid(self.action_adj_logits)
+    
+    def predict_delta(self, var_probs, action_oh):
         adj = self.get_adj()
-        preds = []
+        action_adj = self.get_action_adj()
+        parent_signal = var_probs @ adj  # (4,) weighted parents
+        action_signal = action_oh @ action_adj  # (4,) which actions affect which vars
+        deltas = []
         for i in range(self.n_vars):
-            parents = var_probs * adj[:, i]
-            preds.append(torch.sigmoid(self.struct_eq[i](parents)))
-        return torch.cat(preds)
+            x = torch.cat([parent_signal, action_signal])
+            deltas.append(torch.tanh(self.struct_eq[i](x)))
+        return torch.cat(deltas)
     
     def counterfactual(self, var_probs, intervene_idx, intervene_val):
         modified = var_probs.clone()
@@ -171,18 +137,21 @@ class CausalGraph(nn.Module):
         preds = []
         for i in range(self.n_vars):
             parents = modified * adj[:, i]
-            preds.append(torch.sigmoid(self.struct_eq[i](parents)))
+            dummy_action = torch.zeros(self.n_actions)
+            action_adj = self.get_action_adj()
+            action_signal = dummy_action @ action_adj
+            x = torch.cat([parents, action_signal])
+            preds.append(torch.sigmoid(self.struct_eq[i](x)))
         return torch.cat(preds)
     
     def sparsity_loss(self):
-        return self.get_adj().abs().sum()
+        return (self.get_adj().abs() + 1e-8).sqrt().sum() + \
+               (self.get_action_adj().abs() + 1e-8).sqrt().sum()
 
-# ============ 8. 动作头 ============
 class ActionHead(nn.Module):
     def __init__(self, input_dim, n_actions=6):
         super().__init__()
         self.policy = nn.Linear(input_dim, n_actions)
         self.value = nn.Linear(input_dim, 1)
-    
     def forward(self, h):
         return F.softmax(self.policy(h), dim=-1), self.value(h)

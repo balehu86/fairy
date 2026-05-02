@@ -35,7 +35,7 @@ class CausalGridWorld:
         self.prev_treasure_dist = self._dist_to(self.treasure_pos)
         self._picked_key = False
         self._opened_door = False
-        return self.get_obs()
+        return self.get_obs(), self.get_ground_truth()
     
     def _place_item(self, item, c_min, c_max):
         for _ in range(50):
@@ -44,7 +44,6 @@ class CausalGridWorld:
             if self.grid[r,c] == 0:
                 self.grid[r,c] = item
                 return (r, c)
-        # fallback
         for r in range(1, self.size-1):
             for c in range(c_min, c_max+1):
                 if self.grid[r,c] == 0:
@@ -54,6 +53,20 @@ class CausalGridWorld:
     
     def _dist_to(self, pos):
         return abs(self.agent_pos[0]-pos[0]) + abs(self.agent_pos[1]-pos[1])
+    
+    def get_ground_truth(self):
+        """返回4个因果变量的真实值: [has_key, door_open, near_treasure, saw_decoration]"""
+        near_treasure = 1.0 if self._dist_to(self.treasure_pos) <= 2 else 0.0
+        # 检查视野内是否有装饰
+        r, c = self.agent_pos
+        saw_deco = 0.0
+        for dr in range(-1, 2):
+            for dc in range(-1, 2):
+                nr, nc = r+dr, c+dc
+                if 0<=nr<self.size and 0<=nc<self.size and self.grid[nr,nc]==5:
+                    saw_deco = 1.0
+        return np.array([float(self.has_key), float(self.door_open), 
+                         near_treasure, saw_deco], dtype=np.float32)
     
     def get_obs(self):
         r, c = self.agent_pos
@@ -69,15 +82,12 @@ class CausalGridWorld:
         for i in range(3):
             for j in range(3):
                 view_oh[i, j, view[i,j]] = 1.0
-        obs = np.concatenate([
-            view_oh.flatten(),
-            [float(self.has_key), float(self.door_open)]
-        ])
+        obs = np.concatenate([view_oh.flatten(), [float(self.has_key), float(self.door_open)]])
         return obs.astype(np.float32)
     
     def step(self, action):
         self.steps += 1
-        reward = 0.0  # 不再用步长惩罚, 改用塑形奖励
+        reward = 0.0
         
         r, c = self.agent_pos
         if action == 0 and r > 0: new_pos = [r-1, c]
@@ -91,55 +101,43 @@ class CausalGridWorld:
             if cell == 1: new_pos = [r, c]
             elif cell == 3 and not self.door_open: new_pos = [r, c]
             else: self.agent_pos = new_pos
-        
         elif action == 4:
             if self.grid[r, c] == 2 and not self.has_key:
                 self.has_key = True
                 self.grid[r, c] = 0
-                reward += 0.5  # 拿钥匙大奖励
+                reward += 0.5
                 self._picked_key = True
-        
         elif action == 5:
             for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:
                 nr, nc = r+dr, c+dc
                 if 0<=nr<self.size and 0<=nc<self.size:
                     if self.grid[nr,nc] == 3 and self.has_key and not self.door_open:
                         self.door_open = True
-                        reward += 0.5  # 开门大奖励
+                        reward += 0.5
                         self._opened_door = True
         
-        # === 塑形奖励: 靠近子目标 ===
+        # 塑形奖励
         if not self._picked_key:
             new_dist = self._dist_to(self.key_pos)
             reward += (self.prev_key_dist - new_dist) * 0.1
             self.prev_key_dist = new_dist
-        
         if self._picked_key and not self._opened_door:
             door_pos = (self.size//2, self.size//2)
             new_dist = self._dist_to(door_pos)
             reward += (self.prev_door_dist - new_dist) * 0.1
             self.prev_door_dist = new_dist
-        
         if self._opened_door:
             new_dist = self._dist_to(self.treasure_pos)
             reward += (self.prev_treasure_dist - new_dist) * 0.1
             self.prev_treasure_dist = new_dist
         
-        # 微小步长惩罚 (避免原地转圈)
         reward -= 0.01
         
-        # 宝藏
         if self.agent_pos[0] == self.treasure_pos[0] and \
            self.agent_pos[1] == self.treasure_pos[1]:
             reward += 1.0
             self.done = True
-        
         if self.steps >= self.max_steps:
             self.done = True
         
-        return self.get_obs(), reward, self.done, {}
-    
-    def intervene(self, variable, value):
-        if variable == 'has_key': self.has_key = value
-        elif variable == 'door_open': self.door_open = value
-        return self.get_obs()
+        return self.get_obs(), reward, self.done, self.get_ground_truth()
