@@ -13,17 +13,17 @@ class CSMv2Agent(nn.Module):
         self.n_actions = n_actions
         self.device = DEVICE
         
-        self.encoder = Encoder(obs_dim, H).to(DEVICE)
-        self.meta_goal = MetaGoalLayer(H, goal_dim=8).to(DEVICE)
-        self.scene_router = SparseSceneRouter(H, n_scenes=16).to(DEVICE)
-        self.obj_ssm = GatedSSM(H, state_dim=32).to(DEVICE)
-        self.meta_cog = MetaCognition(obj_state_dim=32, meta_state_dim=16).to(DEVICE)
-        self.slot_mem = SlotMemory(slot_dim=H, n_slots=4).to(DEVICE)
-        self.causal_graph = CausalGraph(n_vars=4, n_actions=n_actions, state_dim=H).to(DEVICE)
+        self.encoder = Encoder(obs_dim, H)
+        self.meta_goal = MetaGoalLayer(H, goal_dim=8)
+        self.scene_router = SparseSceneRouter(H, n_scenes=16)
+        self.obj_ssm = GatedSSM(H, state_dim=32)
+        self.meta_cog = MetaCognition(obj_state_dim=32, meta_state_dim=16)
+        self.slot_mem = SlotMemory(slot_dim=H, n_slots=4)
+        self.causal_graph = CausalGraph(n_vars=4, n_actions=n_actions, state_dim=H)
         
-        self.c2_proj = nn.Linear(32 + 64 + 64, 64).to(DEVICE)
-        self.action_head = ActionHead(64, n_actions).to(DEVICE)
-        self.world_model = nn.Linear(H + n_actions, H).to(DEVICE)
+        self.c2_proj = nn.Linear(32 + 64 + 64, 64)
+        self.action_head = ActionHead(64, n_actions)
+        self.world_model = nn.Linear(H + n_actions, H)
         
         self.pred_err_history = deque(maxlen=200)
         self.global_step = 0
@@ -109,7 +109,8 @@ class CSMv2Agent(nn.Module):
         self.prev_action_oh = oh
     
     def compute_aux_losses(self, h, prev_h, prev_action_oh, var_probs,
-                           prev_var_probs, ground_truth, is_event_step):
+                           prev_var_probs, ground_truth, prev_ground_truth,
+                           action_idx, is_event_step):
         losses = {}
         
         if prev_h is not None and prev_action_oh is not None:
@@ -120,15 +121,19 @@ class CSMv2Agent(nn.Module):
             gt = torch.as_tensor(ground_truth, dtype=torch.float32, device=self.device)
             losses['causal_detect'] = F.binary_cross_entropy(var_probs, gt)
         
-        if self.phase >= 2 and is_event_step and prev_var_probs is not None and prev_action_oh is not None:
-            delta_target = (var_probs - prev_var_probs).detach()
-            if delta_target.abs().sum() > 0.01:
-                pred_delta = self.causal_graph.predict_delta(
-                    prev_var_probs.detach(), prev_action_oh.detach()
-                )
-                weights = delta_target.abs() + 0.1
-                losses['causal_predict'] = (F.mse_loss(pred_delta, delta_target, reduction='none') * weights).mean() * 10.0
-                losses['causal_sparse'] = self.causal_graph.sparsity_loss() * 0.5
+        if self.phase >= 2:
+            if is_event_step and prev_ground_truth is not None and action_idx is not None:
+                gt_delta = torch.as_tensor(ground_truth, dtype=torch.float32, device=self.device) - \
+                           torch.as_tensor(prev_ground_truth, dtype=torch.float32, device=self.device)
+                if gt_delta.abs().sum() > 0.05:
+                    # action→var 监督
+                    losses['event_supervision'] = self.causal_graph.event_supervision_loss(
+                        action_idx, gt_delta) * 5.0
+                    # var→var 共现监督 (关键新增!)
+                    losses['var_causal'] = self.causal_graph.var_causal_supervision_loss(gt_delta) * 3.0
+            
+            # sparsity (温和)
+            losses['causal_sparse'] = self.causal_graph.sparsity_loss() * 0.1
         
         return losses
     

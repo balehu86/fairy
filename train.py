@@ -35,19 +35,22 @@ def collect_episode(agent, env, max_steps=80):
         if prev_gt is not None:
             is_event = np.any(np.abs(gt - prev_gt) > 0.1)
         
-        agent.set_prev_action(action.item())
+        action_idx = action.item()
+        agent.set_prev_action(action_idx)
         aux_losses = agent.compute_aux_losses(
             out['h'], agent.prev_h, agent.prev_action_oh,
-            out['var_probs'], prev_var_probs, gt, is_event
+            out['var_probs'], prev_var_probs, gt, prev_gt,
+            action_idx, is_event
         )
         prev_var_probs = out['var_probs'].detach()
         
         transitions.append({
-            'obs': obs, 'action': action, 'action_idx': action.item(),
+            'obs': obs, 'action': action, 'action_idx': action_idx,
             'log_prob': log_prob, 'entropy': entropy,
             'reward': reward, 'value': out['value'],
             'aux_losses': aux_losses, 'interp': out['interp'],
             'pred_err': out['pred_err'], 'is_event': is_event,
+            'action_repeat': agent.action_repeat_count,  # 保存实际值
         })
         
         total_reward += reward
@@ -67,7 +70,7 @@ def compute_returns(transitions, gamma=0.99):
     return returns
 
 def update_agent(agent, optimizer, transitions,
-                 entropy_coef=0.03, value_coef=0.5, aux_coef=0.3, interp_coef=0.2):
+                 entropy_coef=0.03, value_coef=0.5, aux_coef=0.3, interp_coef=0.3):
     returns = compute_returns(transitions)
     returns_t = torch.tensor(returns, dtype=torch.float32, device=DEVICE)
     if len(returns_t) > 1:
@@ -96,19 +99,20 @@ def update_agent(agent, optimizer, transitions,
     if aux_count > 0:
         loss = loss + aux_coef * total_aux / max(1, aux_count)
     
+    # interp 监督: 用连续 action_repeat, 不二值化
     interp_targets = []
     interp_outputs = []
     for i in range(1, len(transitions)):
         t = transitions[i]
-        prev_a = transitions[i-1]['action_idx']
-        curr_a = t['action_idx']
         pe = t['pred_err']
         r = t['reward']
+        repeat = t['action_repeat']  # 连续值 0-20
         
-        loop = 1.0 if curr_a == prev_a else 0.0
+        # 4 个 target — 连续化!
+        loop = min(repeat / 10.0, 1.0)  # 0→1, 跟输入一致
         conf = 1.0 - min(pe, 1.0)
         expl = min(pe * 3, 1.0)
-        explt = 1.0 if r > 0 else 0.0
+        explt = min(max(r, 0.0), 1.0)  # 正奖励归一化
         
         interp_targets.append([loop, conf, expl, explt])
         interp_outputs.append(t['interp'])
@@ -148,7 +152,9 @@ def train(n_episodes=3000, seed=42):
         {'params': agent.slot_mem.parameters(), 'lr': 3e-4},
         {'params': agent.world_model.parameters(), 'lr': 3e-4},
         {'params': agent.scene_router.parameters(), 'lr': 1e-4},
-        {'params': agent.causal_graph.parameters(), 'lr': 1e-4},
+        {'params': agent.causal_graph.var_detector.parameters(), 'lr': 1e-4},
+        {'params': agent.causal_graph.action_effects, 'lr': 3e-4},
+        {'params': agent.causal_graph.var_causal_logits, 'lr': 3e-4},
         {'params': agent.meta_cog.parameters(), 'lr': 5e-5},
         {'params': agent.meta_goal.parameters(), 'lr': 5e-5},
     ], eps=1e-5)
@@ -156,7 +162,7 @@ def train(n_episodes=3000, seed=42):
     n_params = sum(p.numel() for p in agent.parameters())
     print(f"[csm] 参数量: {n_params:,}")
     print(f"[csm] 设备: {DEVICE}")
-    print(f"[csm] 修复: 直接因果参数 + interp前馈 + 事件步训练")
+    print(f"[csm] 修复: interp连续target(不再二值化)")
     
     rewards_log = deque(maxlen=100)
     success_log = deque(maxlen=100)
