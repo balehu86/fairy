@@ -7,6 +7,7 @@ import time, json, os
 
 from env import CausalGridWorld
 from csm_agent import CSMv2Agent
+from device_utils import DEVICE
 
 MIN_ENTROPY = 0.3
 
@@ -30,7 +31,6 @@ def collect_episode(agent, env, max_steps=80):
         
         next_obs, reward, done, next_gt = env.step(action.item())
         
-        # 事件步检测: 因果变量是否变化
         is_event = False
         if prev_gt is not None:
             is_event = np.any(np.abs(gt - prev_gt) > 0.1)
@@ -43,17 +43,11 @@ def collect_episode(agent, env, max_steps=80):
         prev_var_probs = out['var_probs'].detach()
         
         transitions.append({
-            'obs': obs,
-            'action': action,
-            'action_idx': action.item(),
-            'log_prob': log_prob,
-            'entropy': entropy,
-            'reward': reward,
-            'value': out['value'],
-            'aux_losses': aux_losses,
-            'interp': out['interp'],
-            'pred_err': out['pred_err'],
-            'is_event': is_event,
+            'obs': obs, 'action': action, 'action_idx': action.item(),
+            'log_prob': log_prob, 'entropy': entropy,
+            'reward': reward, 'value': out['value'],
+            'aux_losses': aux_losses, 'interp': out['interp'],
+            'pred_err': out['pred_err'], 'is_event': is_event,
         })
         
         total_reward += reward
@@ -75,7 +69,7 @@ def compute_returns(transitions, gamma=0.99):
 def update_agent(agent, optimizer, transitions,
                  entropy_coef=0.03, value_coef=0.5, aux_coef=0.3, interp_coef=0.2):
     returns = compute_returns(transitions)
-    returns_t = torch.tensor(returns, dtype=torch.float32)
+    returns_t = torch.tensor(returns, dtype=torch.float32, device=DEVICE)
     if len(returns_t) > 1:
         returns_t = (returns_t - returns_t.mean()) / (returns_t.std() + 1e-8)
     
@@ -92,8 +86,7 @@ def update_agent(agent, optimizer, transitions,
     
     loss = policy_loss + value_coef * value_loss - entropy_coef * entropy_bonus + entropy_pen
     
-    # 辅助损失
-    total_aux = torch.tensor(0.0)
+    total_aux = torch.tensor(0.0, device=DEVICE)
     aux_count = 0
     for t in transitions:
         for k, v in t['aux_losses'].items():
@@ -103,7 +96,6 @@ def update_agent(agent, optimizer, transitions,
     if aux_count > 0:
         loss = loss + aux_coef * total_aux / max(1, aux_count)
     
-    # interp 辅助监督
     interp_targets = []
     interp_outputs = []
     for i in range(1, len(transitions)):
@@ -122,7 +114,7 @@ def update_agent(agent, optimizer, transitions,
         interp_outputs.append(t['interp'])
     
     if interp_outputs:
-        targets_t = torch.tensor(interp_targets, dtype=torch.float32)
+        targets_t = torch.tensor(interp_targets, dtype=torch.float32, device=DEVICE)
         outputs_t = torch.stack(interp_outputs)
         interp_loss = F.mse_loss(outputs_t, targets_t)
         loss = loss + interp_coef * interp_loss
@@ -142,6 +134,8 @@ def update_agent(agent, optimizer, transitions,
 def train(n_episodes=3000, seed=42):
     torch.manual_seed(seed)
     np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
     
     envs = [CausalGridWorld(seed=seed+i) for i in range(5)]
     agent = CSMv2Agent()
@@ -161,7 +155,8 @@ def train(n_episodes=3000, seed=42):
     
     n_params = sum(p.numel() for p in agent.parameters())
     print(f"[csm] 参数量: {n_params:,}")
-    print(f"[csm] 修复: 事件步因果训练 + 动作->变量边 + action_repeat输入")
+    print(f"[csm] 设备: {DEVICE}")
+    print(f"[csm] 修复: 直接因果参数 + interp前馈 + 事件步训练")
     
     rewards_log = deque(maxlen=100)
     success_log = deque(maxlen=100)
@@ -188,10 +183,11 @@ def train(n_episodes=3000, seed=42):
             avg_r = np.mean(rewards_log)
             succ = np.mean(success_log)
             elapsed = time.time() - start
+            vram = f"{torch.cuda.memory_allocated()/1024**2:.0f}MB" if torch.cuda.is_available() else "N/A"
             print(f"[csm] Ep {ep+1}/{n_episodes} P{agent.phase} | "
                   f"AvgR: {avg_r:.3f} | Succ: {succ:.2%} | "
                   f"Ent: {metrics['entropy']:.3f} | "
-                  f"Time: {elapsed:.1f}s")
+                  f"VRAM: {vram} | Time: {elapsed:.1f}s")
             history['episode'].append(ep+1)
             history['avg_reward'].append(float(avg_r))
             history['success_rate'].append(float(succ))

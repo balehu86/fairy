@@ -14,7 +14,8 @@ class MetaGoalLayer(nn.Module):
         super().__init__()
         self.priority_head = nn.Linear(input_dim + 3, goal_dim)
     def forward(self, h, curiosity, capability_gap, ext_reward):
-        signals = torch.tensor([curiosity, capability_gap, ext_reward], dtype=torch.float32)
+        signals = torch.tensor([curiosity, capability_gap, ext_reward],
+                               dtype=torch.float32, device=h.device)
         return torch.tanh(self.priority_head(torch.cat([h, signals])))
 
 class SparseSceneRouter(nn.Module):
@@ -51,21 +52,23 @@ class GatedSSM(nn.Module):
         return self.output_proj(S_new), S_new
 
 class MetaCognition(nn.Module):
-    """输入: delta_S_obj(32) + action_repeat_count(1) + 3 scalars = 36"""
     def __init__(self, obj_state_dim=32, meta_state_dim=16):
         super().__init__()
-        trace_dim = obj_state_dim + 1 + 3  # +1 for action_repeat
+        trace_dim = obj_state_dim + 1 + 3
         self.trace_encoder = nn.Linear(trace_dim, meta_state_dim)
         self.meta_ssm = GatedSSM(meta_state_dim, meta_state_dim)
         self.delta_signal_proj = nn.Linear(meta_state_dim, obj_state_dim)
-        self.interp_head = nn.Linear(meta_state_dim, 4)
+        self.interp_ff = nn.Sequential(
+            nn.Linear(trace_dim, 16), nn.ReLU(), nn.Linear(16, 4), nn.Sigmoid())
     def forward(self, delta_S_obj, action_repeat, pred_err, confidence, entropy, S_meta):
-        trace = torch.cat([delta_S_obj, torch.tensor([action_repeat]),
-                           torch.tensor([pred_err, confidence, entropy])])
+        dev = delta_S_obj.device
+        trace = torch.cat([delta_S_obj,
+                           torch.tensor([action_repeat], device=dev),
+                           torch.tensor([pred_err, confidence, entropy], device=dev)])
         x = self.trace_encoder(trace)
         _, S_meta_new = self.meta_ssm(x, S_meta)
         delta_signal = torch.tanh(self.delta_signal_proj(S_meta_new))
-        interp = torch.sigmoid(self.interp_head(S_meta_new))
+        interp = self.interp_ff(trace)
         return delta_signal, S_meta_new, interp
 
 class SlotMemory(nn.Module):
@@ -87,66 +90,39 @@ class SlotMemory(nn.Module):
         return read, new_slots
 
 class CausalGraph(nn.Module):
-    """
-    v2.1-final:
-    - 变量→变量边 (4x4 A矩阵)
-    - 动作→变量边 (6x4 B矩阵，新增!)
-    - predict_delta: Delta_v_i = struct_eq(A·parents, B·action)
-    - 只在事件步训练转移预测
-    """
     def __init__(self, n_vars=4, n_actions=6, state_dim=64):
         super().__init__()
         self.n_vars = n_vars
         self.n_actions = n_actions
         self.var_detector = nn.Linear(state_dim, n_vars)
-        # 变量→变量
-        self.adj_logits = nn.Parameter(torch.randn(n_vars, n_vars) * 0.1)
-        # 动作→变量 (新增! 关键!)
-        self.action_adj_logits = nn.Parameter(torch.randn(n_actions, n_vars) * 0.1)
-        # 结构方程: parents(4) + action_effect(4) = 8
-        self.struct_eq = nn.ModuleList([
-            nn.Linear(n_vars + n_vars, 1) for _ in range(n_vars)
-        ])
+        self.action_effects = nn.Parameter(torch.zeros(n_actions, n_vars))
+        self.var_causal_logits = nn.Parameter(torch.zeros(n_vars, n_vars))
     
     def detect_vars(self, h):
         return torch.sigmoid(self.var_detector(h))
     
-    def get_adj(self):
-        adj = torch.sigmoid(self.adj_logits) * (1 - torch.eye(self.n_vars))
-        return adj
-    
-    def get_action_adj(self):
-        return torch.sigmoid(self.action_adj_logits)
+    def get_var_adj(self):
+        return torch.sigmoid(self.var_causal_logits) * (1 - torch.eye(self.n_vars, device=self.var_causal_logits.device))
     
     def predict_delta(self, var_probs, action_oh):
-        adj = self.get_adj()
-        action_adj = self.get_action_adj()
-        parent_signal = var_probs @ adj  # (4,) weighted parents
-        action_signal = action_oh @ action_adj  # (4,) which actions affect which vars
-        deltas = []
-        for i in range(self.n_vars):
-            x = torch.cat([parent_signal, action_signal])
-            deltas.append(torch.tanh(self.struct_eq[i](x)))
-        return torch.cat(deltas)
+        direct = action_oh @ self.action_effects
+        adj = self.get_var_adj()
+        mediated = direct @ adj
+        return torch.tanh(direct + mediated)
     
     def counterfactual(self, var_probs, intervene_idx, intervene_val):
         modified = var_probs.clone()
         modified[intervene_idx] = intervene_val
-        adj = self.get_adj().clone()
+        adj = self.get_var_adj().clone()
         adj[:, intervene_idx] = 0
-        preds = []
-        for i in range(self.n_vars):
-            parents = modified * adj[:, i]
-            dummy_action = torch.zeros(self.n_actions)
-            action_adj = self.get_action_adj()
-            action_signal = dummy_action @ action_adj
-            x = torch.cat([parents, action_signal])
-            preds.append(torch.sigmoid(self.struct_eq[i](x)))
-        return torch.cat(preds)
+        delta = modified - var_probs
+        propagated = delta @ adj
+        return torch.clamp(var_probs + propagated, 0, 1)
     
     def sparsity_loss(self):
-        return (self.get_adj().abs() + 1e-8).sqrt().sum() + \
-               (self.get_action_adj().abs() + 1e-8).sqrt().sum()
+        l1_action = self.action_effects.abs().sum()
+        l1_var = (self.get_var_adj() + 1e-8).sqrt().sum()
+        return l1_action + l1_var * 0.5
 
 class ActionHead(nn.Module):
     def __init__(self, input_dim, n_actions=6):
