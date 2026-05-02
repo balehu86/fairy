@@ -1,0 +1,1175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>概念状态机 v2 — 改进架构文档</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0e0f11;
+  --bg2: #141518;
+  --bg3: #1a1c21;
+  --border: #2a2d35;
+  --border2: #363a45;
+  --text: #d4d6dc;
+  --text2: #8a8e9a;
+  --text3: #555a68;
+  --acc-orig: #e8a44a;
+  --acc-new: #7c9ee8;
+  --acc-core: #5bbfa0;
+  --acc-reward: #d46b6b;
+  --acc-orig-dim: rgba(232,164,74,0.12);
+  --acc-new-dim: rgba(124,158,232,0.12);
+  --acc-core-dim: rgba(91,191,160,0.12);
+  --acc-reward-dim: rgba(212,107,107,0.12);
+  --mono: 'IBM Plex Mono', monospace;
+  --serif: 'Noto Serif SC', serif;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+/* ── Layout ── */
+.shell {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  grid-template-rows: 56px 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+header {
+  grid-column: 1 / -1;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  gap: 16px;
+  background: var(--bg2);
+}
+.logo-mark {
+  font-size: 11px;
+  color: var(--text3);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+header h1 {
+  font-family: var(--serif);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+.version-tag {
+  font-size: 10px;
+  padding: 2px 8px;
+  border: 1px solid var(--acc-new);
+  color: var(--acc-new);
+  border-radius: 2px;
+  letter-spacing: 0.08em;
+}
+.legend {
+  margin-left: auto;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+.leg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text2);
+}
+.leg-dot {
+  width: 8px; height: 8px;
+  border-radius: 1px;
+}
+
+/* ── Sidebar ── */
+nav {
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 16px 0;
+}
+.nav-section {
+  padding: 4px 16px 8px;
+  font-size: 10px;
+  color: var(--text3);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-top: 8px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  cursor: pointer;
+  color: var(--text2);
+  font-size: 12px;
+  border-left: 2px solid transparent;
+  transition: all 0.15s;
+  user-select: none;
+}
+.nav-item:hover { background: var(--bg3); color: var(--text); }
+.nav-item.active {
+  color: var(--text);
+  background: var(--bg3);
+}
+.nav-item.active.orig { border-left-color: var(--acc-orig); color: var(--acc-orig); }
+.nav-item.active.new  { border-left-color: var(--acc-new);  color: var(--acc-new);  }
+.nav-item.active.core { border-left-color: var(--acc-core); color: var(--acc-core); }
+.nav-item.active.reward { border-left-color: var(--acc-reward); color: var(--acc-reward); }
+.nav-type {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 2px;
+  margin-left: auto;
+  letter-spacing: 0.06em;
+}
+.tag-orig   { background: var(--acc-orig-dim);   color: var(--acc-orig); }
+.tag-new    { background: var(--acc-new-dim);    color: var(--acc-new); }
+.tag-core   { background: var(--acc-core-dim);   color: var(--acc-core); }
+.tag-reward { background: var(--acc-reward-dim); color: var(--acc-reward); }
+
+/* ── Main content ── */
+main {
+  overflow-y: auto;
+  padding: 32px 40px;
+  background: var(--bg);
+}
+
+/* ── Panels ── */
+.panel { display: none; }
+.panel.active { display: block; }
+
+/* ── Overview diagram ── */
+.diagram {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+}
+.row {
+  display: flex;
+  gap: 3px;
+  align-items: stretch;
+}
+.node {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  background: var(--bg2);
+  position: relative;
+}
+.node:hover { border-color: var(--border2); background: var(--bg3); }
+.node.selected { border-color: var(--acc-core) !important; }
+.node.orig  { border-color: #2a2d35; }
+.node.new   { border-color: rgba(124,158,232,0.35); background: var(--acc-new-dim); }
+.node.core  { border-color: rgba(91,191,160,0.35); background: var(--acc-core-dim); }
+.node.reward{ border-color: rgba(212,107,107,0.35); background: var(--acc-reward-dim); }
+.node.orig:hover  { border-color: var(--acc-orig); }
+.node.new:hover   { border-color: var(--acc-new); }
+.node.core:hover  { border-color: var(--acc-core); }
+.node.reward:hover{ border-color: var(--acc-reward); }
+.node-title {
+  font-weight: 500;
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+.node.orig  .node-title { color: var(--acc-orig); }
+.node.new   .node-title { color: var(--acc-new); }
+.node.core  .node-title { color: var(--acc-core); }
+.node.reward .node-title { color: var(--acc-reward); }
+.node-sub { color: var(--text3); font-size: 11px; }
+.node-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 2px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.full  { flex: 1; }
+.half  { flex: 1; }
+.arrow-row {
+  display: flex;
+  justify-content: center;
+  color: var(--text3);
+  font-size: 16px;
+  line-height: 1;
+  padding: 1px 0;
+  position: relative;
+}
+.arrow-row.split::before,
+.arrow-row.split::after {
+  content: '↓';
+  position: absolute;
+}
+.arrow-row.split::before { left: calc(25% - 8px); }
+.arrow-row.split::after  { right: calc(25% - 8px); }
+
+.dashed-row {
+  display: flex;
+  gap: 3px;
+}
+.feedback-line {
+  border: 1px dashed var(--border2);
+  border-radius: 4px;
+  padding: 5px 14px;
+  font-size: 11px;
+  color: var(--text3);
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.feedback-line::before { content: '↺'; color: var(--acc-reward); }
+
+/* ── Detail panel ── */
+.detail-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+.detail-icon {
+  width: 40px; height: 40px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+.detail-title {
+  font-family: var(--serif);
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.detail-meta {
+  font-size: 11px;
+  color: var(--text3);
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.detail-meta span { display: flex; align-items: center; gap: 4px; }
+
+.section {
+  margin-bottom: 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.section-head {
+  background: var(--bg2);
+  padding: 8px 16px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text3);
+  border-bottom: 1px solid var(--border);
+}
+.section-body { padding: 16px; }
+.section-body p { color: var(--text2); line-height: 1.75; margin-bottom: 10px; }
+.section-body p:last-child { margin-bottom: 0; }
+
+.props {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.prop {
+  background: var(--bg3);
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+.prop-key { color: var(--text3); font-size: 11px; margin-bottom: 4px; }
+.prop-val { color: var(--text); font-size: 12px; font-weight: 500; }
+
+.code-block {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 14px 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--acc-core);
+  line-height: 1.8;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.tag-list { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.tag {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 3px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text2);
+}
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.compare-card {
+  border-radius: 4px;
+  padding: 12px 14px;
+}
+.compare-card.before { background: rgba(212,107,107,0.08); border: 1px solid rgba(212,107,107,0.2); }
+.compare-card.after  { background: rgba(91,191,160,0.08);  border: 1px solid rgba(91,191,160,0.2);  }
+.compare-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px; }
+.compare-card.before .compare-label { color: var(--acc-reward); }
+.compare-card.after  .compare-label { color: var(--acc-core); }
+.compare-card p { font-size: 12px; color: var(--text2); line-height: 1.7; }
+
+/* ── Overview landing ── */
+.overview-intro {
+  margin-bottom: 28px;
+}
+.overview-intro h2 {
+  font-family: var(--serif);
+  font-size: 22px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.overview-intro p { color: var(--text2); line-height: 1.75; max-width: 640px; }
+.hint { font-size: 11px; color: var(--text3); margin-top: 12px; }
+
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin-bottom: 28px;
+}
+.stat {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+.stat-num {
+  font-family: var(--serif);
+  font-size: 22px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.stat-label { font-size: 11px; color: var(--text3); }
+
+/* ── Training timeline ── */
+.timeline { display: flex; flex-direction: column; gap: 3px; }
+.phase {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.phase:hover { border-color: var(--border2); }
+.phase.new-phase { border-color: rgba(124,158,232,0.3); background: var(--acc-new-dim); }
+.phase-label {
+  font-size: 11px;
+  font-weight: 500;
+  min-width: 60px;
+  padding-top: 1px;
+}
+.phase.new-phase .phase-label { color: var(--acc-new); }
+.phase-content { flex: 1; }
+.phase-title { font-weight: 500; margin-bottom: 4px; }
+.phase-desc { color: var(--text2); font-size: 11px; line-height: 1.65; }
+.phase-dur {
+  font-size: 10px;
+  color: var(--text3);
+  margin-left: auto;
+  min-width: 70px;
+  text-align: right;
+  padding-top: 2px;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+<header>
+  <span class="logo-mark">CSM</span>
+  <h1>概念状态机 — 改进架构文档</h1>
+  <span class="version-tag">v2.0</span>
+  <div class="legend">
+    <div class="leg"><div class="leg-dot" style="background:var(--acc-orig)"></div>原有模块</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--acc-core)"></div>核心改进</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--acc-new)"></div>新增模块</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--acc-reward)"></div>奖励信号</div>
+  </div>
+</header>
+
+<!-- Sidebar -->
+<nav>
+  <div class="nav-section">概览</div>
+  <div class="nav-item active core" data-panel="overview" onclick="nav(this,'overview')">
+    <span>总体架构</span>
+    <span class="nav-type tag-core">总览</span>
+  </div>
+  <div class="nav-item" data-panel="training" onclick="nav(this,'training')">
+    <span>训练范式</span>
+    <span class="nav-type tag-orig">五阶段</span>
+  </div>
+
+  <div class="nav-section">新增模块</div>
+  <div class="nav-item new" data-panel="c-1" onclick="nav(this,'c-1')">
+    <span>C₋₁ 元目标层</span>
+    <span class="nav-type tag-new">新增</span>
+  </div>
+  <div class="nav-item new" data-panel="meta" onclick="nav(this,'meta')">
+    <span>S_meta 元认知层</span>
+    <span class="nav-type tag-new">新增</span>
+  </div>
+  <div class="nav-item new" data-panel="causal" onclick="nav(this,'causal')">
+    <span>因果图层 G</span>
+    <span class="nav-type tag-new">新增</span>
+  </div>
+  <div class="nav-item new" data-panel="reward" onclick="nav(this,'reward')">
+    <span>内部奖励计算</span>
+    <span class="nav-type tag-reward">新增</span>
+  </div>
+
+  <div class="nav-section">改进模块</div>
+  <div class="nav-item orig" data-panel="embedder" onclick="nav(this,'embedder')">
+    <span>多模态嵌入层</span>
+    <span class="nav-type tag-orig">原有</span>
+  </div>
+  <div class="nav-item core" data-panel="scene" onclick="nav(this,'scene')">
+    <span>场景感知稀疏激活</span>
+    <span class="nav-type tag-core">改进</span>
+  </div>
+  <div class="nav-item core" data-panel="mamba" onclick="nav(this,'mamba')">
+    <span>S_obj Mamba核心</span>
+    <span class="nav-type tag-core">改进</span>
+  </div>
+  <div class="nav-item orig" data-panel="concept" onclick="nav(this,'concept')">
+    <span>层次化概念空间</span>
+    <span class="nav-type tag-orig">原有</span>
+  </div>
+  <div class="nav-item orig" data-panel="output" onclick="nav(this,'output')">
+    <span>输出投影层</span>
+    <span class="nav-type tag-orig">原有</span>
+  </div>
+</nav>
+
+<!-- Main -->
+<main>
+
+<!-- ── OVERVIEW ── -->
+<div id="panel-overview" class="panel active">
+  <div class="overview-intro">
+    <h2>改进架构总览</h2>
+    <p>在原有 CSM 基础上新增三个核心模块：元目标层（C₋₁）、元认知层（S_meta）和因果图层（G），并对场景路由器和 Mamba 核心进行调制增强。点击下方任意节点查看详情。</p>
+    <div class="hint">← 左侧导航可直接跳转各模块 · 节点可点击</div>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat">
+      <div class="stat-num" style="color:var(--acc-new)">+3</div>
+      <div class="stat-label">新增核心模块</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num" style="color:var(--acc-orig)">16</div>
+      <div class="stat-label">C₋₁ 元目标维度</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num" style="color:var(--acc-core)">2层</div>
+      <div class="stat-label">并行 Mamba 状态机</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num" style="color:var(--acc-reward)">+3</div>
+      <div class="stat-label">新增训练损失项</div>
+    </div>
+  </div>
+
+  <div class="diagram">
+
+    <!-- 输入 -->
+    <div class="row">
+      <div class="node orig full" onclick="go('embedder')">
+        <div class="node-title">多模态嵌入层</div>
+        <div class="node-sub">视觉 · 听觉 · 文本 · 动作 → 统一状态空间</div>
+      </div>
+    </div>
+
+    <div class="arrow-row">↓</div>
+
+    <!-- C-1 + 因果图 -->
+    <div class="row">
+      <div class="node new half" onclick="go('c-1')">
+        <div class="node-title">C₋₁ 元目标层 <span class="node-badge tag-new">新增</span></div>
+        <div class="node-sub">好奇心 · 能力缺口检测 · 目标冲突仲裁  d=16</div>
+      </div>
+      <div class="node new half" onclick="go('causal')">
+        <div class="node-title">因果图层 G <span class="node-badge tag-new">新增</span></div>
+        <div class="node-sub">变量因果矩阵 · 干预表征 · 反事实推理</div>
+      </div>
+    </div>
+
+    <div class="arrow-row">↓</div>
+
+    <!-- C0 -->
+    <div class="row">
+      <div class="node core full" onclick="go('concept')">
+        <div class="node-title">C₀ 抽象概念层 <span class="node-badge tag-core">受目标调制</span></div>
+        <div class="node-sub">意图 · 主题 · 情感基调 · 目标  d=64</div>
+      </div>
+    </div>
+
+    <div class="arrow-row">↓</div>
+
+    <!-- 场景路由 -->
+    <div class="row">
+      <div class="node core full" onclick="go('scene')">
+        <div class="node-title">场景感知稀疏激活 <span class="node-badge tag-core">改进：目标驱动路由</span></div>
+        <div class="node-sub">64个可学习场景原型 · Gumbel-Softmax · C₋₁反向调制权重 · 激活40–55%维度</div>
+      </div>
+    </div>
+
+    <div class="arrow-row">↓</div>
+
+    <!-- 双层Mamba -->
+    <div class="row">
+      <div class="node new half" onclick="go('meta')">
+        <div class="node-title">S_meta 元认知层 <span class="node-badge tag-new">新增</span></div>
+        <div class="node-sub">观察推理轨迹 · 输出 ΔA 修改对象层动力学</div>
+      </div>
+      <div class="node core half" onclick="go('mamba')">
+        <div class="node-title">S_obj 对象层 Mamba <span class="node-badge tag-core">改进</span></div>
+        <div class="node-sub">S' = A·S + B·x + ControlNet(c)  ·  A = A_base + ΔA</div>
+      </div>
+    </div>
+
+    <div class="arrow-row">↓</div>
+
+    <!-- 概念状态 -->
+    <div class="row">
+      <div class="node orig full" onclick="go('concept')">
+        <div class="node-title">层次化概念状态（C₁ → C₂ → C₃）</div>
+        <div class="node-sub">中层概念 d=256 · 具体语义 d=512 · 实例化 d=1024 · 因果图G同步更新</div>
+      </div>
+    </div>
+
+    <div class="arrow-row">↓</div>
+
+    <!-- 内部奖励 + 控制符 -->
+    <div class="row">
+      <div class="node reward half" onclick="go('reward')">
+        <div class="node-title">内部奖励计算 <span class="node-badge tag-reward">新增</span></div>
+        <div class="node-sub">预测误差 r₁ · 任务完成度 r₂ · 状态一致性 r₃</div>
+      </div>
+      <div class="node orig half" onclick="go('scene')">
+        <div class="node-title">控制符系统（内生化）</div>
+        <div class="node-sub">时间节律 · 导航 · 结构 · 生成</div>
+      </div>
+    </div>
+
+    <!-- 奖励反馈 -->
+    <div class="dashed-row" style="margin-top:3px">
+      <div class="feedback-line">内部奖励反馈至 C₋₁ 元目标层（虚线 = 反馈信号）</div>
+    </div>
+
+    <div class="arrow-row">↓</div>
+
+    <!-- 输出 -->
+    <div class="row">
+      <div class="node orig full" onclick="go('output')">
+        <div class="node-title">输出投影层</div>
+        <div class="node-sub">文本 C₃→词表 · 图像 C₂→扩散 · 动作 C₀→策略头 · 状态直接传输</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── TRAINING ── -->
+<div id="panel-training" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-orig-dim)">⬡</div>
+    <div>
+      <div class="detail-title">训练范式（五阶段）</div>
+      <div class="detail-meta">
+        <span>总时长约 4–8 个月</span>
+        <span>阶段E为新增</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="timeline">
+    <div class="phase" onclick="">
+      <div class="phase-label" style="color:var(--acc-orig)">阶段 A</div>
+      <div class="phase-content">
+        <div class="phase-title">过完备初始化训练</div>
+        <div class="phase-desc">多模态对比学习 · 时序预测 · 场景原型涌现 · 因果图G预训练 · Gumbel-Softmax软路由 · 温度退火5.0→0.5 · 128–256 GPU</div>
+      </div>
+      <div class="phase-dur">3–6 个月</div>
+    </div>
+    <div class="phase" onclick="">
+      <div class="phase-label" style="color:var(--acc-orig)">阶段 B</div>
+      <div class="phase-content">
+        <div class="phase-title">使用统计</div>
+        <div class="phase-desc">记录每个维度激活频率 · 场景关联 · S_meta行为记录 · C₋₁目标层激活模式分析 · 识别核心/专用/死维度</div>
+      </div>
+      <div class="phase-dur">2–4 周</div>
+    </div>
+    <div class="phase" onclick="">
+      <div class="phase-label" style="color:var(--acc-orig)">阶段 C</div>
+      <div class="phase-content">
+        <div class="phase-title">剪枝</div>
+        <div class="phase-desc">262,144维 → 65,536维 · 保留核心+重要专用维度 · 死维度建立映射 · 因果图G同步剪枝保留重要因果边</div>
+      </div>
+      <div class="phase-dur">数小时</div>
+    </div>
+    <div class="phase" onclick="">
+      <div class="phase-label" style="color:var(--acc-orig)">阶段 D</div>
+      <div class="phase-content">
+        <div class="phase-title">微调</div>
+        <div class="phase-desc">补偿剪枝损失 · 优化场景路由精度 · S_meta初始策略训练 · 因果图置信度校准 · 32–64 GPU</div>
+      </div>
+      <div class="phase-dur">1–2 周</div>
+    </div>
+    <div class="phase new-phase" onclick="">
+      <div class="phase-label">阶段 E</div>
+      <div class="phase-content">
+        <div class="phase-title">自主探索训练（新增）</div>
+        <div class="phase-desc">不给固定任务 · 给系统一个开放环境 · 让C₋₁自主产生目标 · 尝试达成 · 用成功/失败更新内部奖励模型 · S_meta观察过程并修改推理策略 · 类似婴儿自由探索期——当前所有LLM训练完全缺失的阶段</div>
+      </div>
+      <div class="phase-dur">2–4 周</div>
+    </div>
+  </div>
+
+  <div class="section" style="margin-top:24px">
+    <div class="section-head">改进后的损失函数</div>
+    <div class="section-body">
+      <div class="code-block">L_total = L_align   // 多模态对齐（InfoNCE）
+        + L_pred    // 状态预测（MSE）
+        + L_sparse  // 稀疏正则化
+        + L_diverse // 场景多样性
+        + L_consist // 状态一致性
+        + L_cycle   // 循环一致性（原有六项）
+
+        + L_causal  // 因果一致性（新增）——反事实数据监督
+        + L_meta    // 元认知准确度（新增）——S_meta预测精度
+        + L_reward  // 内部奖励塑造（新增）——内在动机形成</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── C-1 ── -->
+<div id="panel-c-1" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-new-dim)">◈</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-new)">C₋₁ 元目标层</div>
+      <div class="detail-meta">
+        <span class="tag-new" style="padding:2px 8px;border-radius:3px">新增模块</span>
+        <span>维度 d = 16</span>
+        <span>位于 C₀ 之上</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">设计动机</div>
+    <div class="section-body">
+      <p>原有架构是纯响应式的——等待输入、处理、输出，没有自驱动力。C₋₁ 层的目的是让系统能产生自己的"想做什么"，并将其向下传递给场景路由器，将注意力从被动响应变为目标主动引导。</p>
+      <p>这是从"工具"到"有限自主系统"最关键的结构性改变。</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">三个子组件</div>
+    <div class="section-body">
+      <div class="props">
+        <div class="prop">
+          <div class="prop-key">好奇心信号</div>
+          <div class="prop-val">ICM 模块</div>
+          <div class="node-sub" style="margin-top:6px">预测误差大的区域 → 驱动探索。误差高 = 有趣 = 值得关注。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">能力缺口检测</div>
+          <div class="prop-val">历史误差分析</div>
+          <div class="node-sub" style="margin-top:6px">任务失败模式分析 → 识别系统不擅长的领域 → 驱动针对性学习。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">目标层次树</div>
+          <div class="prop-val">长期→子目标分解</div>
+          <div class="node-sub" style="margin-top:6px">长期目标动态分解为短期子目标，支持多步规划。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">目标冲突仲裁</div>
+          <div class="prop-val">软约束满足</div>
+          <div class="node-sub" style="margin-top:6px">多目标之间的优先级动态调整，避免目标之间相互干扰。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">关键机制：反向调制场景路由</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">原有（输入驱动）</div>
+          <p>路由器只根据当前输入决定激活哪些维度。<br>"我看到了什么" → 激活相关维度</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">改进后（目标驱动）</div>
+          <p>C₋₁ 的目标向量对路由权重施加偏置。<br>"我想做什么" → 也影响激活哪些维度</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">边界说明</div>
+    <div class="section-body">
+      <p>C₋₁ 的目标由内部奖励驱动，但内部奖励本身（好奇心、一致性）仍是人工设计的。系统自己产生的"目标"，本质上是对人工定义奖励函数的优化。真正的"想要"从哪里来——这是哲学问题，不是工程问题，目前没有答案。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── META ── -->
+<div id="panel-meta" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-new-dim)">⟳</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-new)">S_meta 元认知层</div>
+      <div class="detail-meta">
+        <span class="tag-new" style="padding:2px 8px;border-radius:3px">新增模块</span>
+        <span>与 S_obj 并行运行</span>
+        <span>每 N 步更新一次</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">核心思想</div>
+    <div class="section-body">
+      <p>原架构中"观察自身状态"只是读取状态向量——这不是真正的元认知。真正的自指需要系统能对自己的<strong style="color:var(--text);font-weight:500">推理过程</strong>建模，而不只是读取当前激活值。</p>
+      <p>S_meta 的输入不是外部数据，而是 S_obj 的推理轨迹本身。它的输出是 ΔA——直接修改 S_obj 的 A 矩阵参数。这是自我修改的最小可行实现。</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">输入 vs 输出</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before" style="border-color:rgba(124,158,232,0.2);background:var(--acc-new-dim)">
+          <div class="compare-label" style="color:var(--acc-new)">S_meta 的输入</div>
+          <p>· S_obj 的推理轨迹<br>· 历史预测误差<br>· 控制符使用统计<br>· 内部奖励信号</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">S_meta 的输出</div>
+          <p>· ΔA（修改 A 矩阵）<br>· 内生控制符<br>· 置信度评估<br>· 目标层更新信号</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">状态更新方程</div>
+    <div class="section-body">
+      <div class="code-block">// 对象层（每步更新）
+S_obj' = (A_base + ΔA) · S_obj + B · x + ControlNet(c)
+
+// 元认知层（每N步更新）
+S_meta' = f_meta(S_meta, trajectory(S_obj), reward)
+
+// 元认知层输出
+ΔA      = MLP_A(S_meta)      // 修改对象层动力学
+ctrl    = MLP_ctrl(S_meta)   // 内生控制符
+conf    = sigmoid(MLP_c(S_meta))  // 置信度</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">与普通自我观察的根本区别</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">仅读取状态（原有）</div>
+          <p>把当前状态向量作为额外输入通道读取。没有修改推理逻辑的能力，只是"看到"自己。</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">修改动力学（改进后）</div>
+          <p>S_meta 可以改变 A 矩阵的部分参数，即修改 S_obj 的状态转移规则。系统不只"看到"自己，还能改变自己的思维方式。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── CAUSAL ── -->
+<div id="panel-causal" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-new-dim)">⇢</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-new)">因果图层 G</div>
+      <div class="detail-meta">
+        <span class="tag-new" style="padding:2px 8px;border-radius:3px">新增模块</span>
+        <span>稀疏矩阵</span>
+        <span>与状态空间协同演化</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">为什么需要因果推断</div>
+    <div class="section-body">
+      <p>当前架构（包括所有 LLM）本质上是统计关联学习，无法区分相关和因果。经典反例：夏天冰激凌销量↑ 和溺水率↑ 高度相关，但买冰激凌不会导致溺水。</p>
+      <p>Pearl 因果层级：关联（观察到 A→B）→ 干预（do(A)→B）→ 反事实（如果 A 没发生，B 会如何）。当前 LLM 基本停留在第一层，本模块目标是覆盖第二、三层。</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">普通更新 vs 因果更新</div>
+    <div class="section-body">
+      <div class="code-block">// 普通状态更新（统计关联）
+S' = f(S, x)
+// 观察到 x 后状态如何变化——只能学习关联
+
+// 因果状态更新（干预表征）
+S' = f(S, do(x))
+// 如果强制 x 发生，状态预测如何变化——区分相关 vs 因果</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">因果图 G 的工作机制</div>
+    <div class="section-body">
+      <div class="props">
+        <div class="prop">
+          <div class="prop-key">学习方式</div>
+          <div class="prop-val">反事实训练数据</div>
+          <div class="node-sub" style="margin-top:6px">通过随机干预实验和结构方程建模从数据中学习因果关系。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">实时更新</div>
+          <div class="prop-val">每步更新边权重</div>
+          <div class="node-sub" style="margin-top:6px">每次状态更新后同步更新 G 的因果置信度，稀疏约束防止假阳性。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">推理时用途</div>
+          <div class="prop-val">反事实查询</div>
+          <div class="node-sub" style="margin-top:6px">回答"如果我做 X，Y 会发生吗"——干预效果预测与归因分析。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">实现难度</div>
+          <div class="prop-val">极高</div>
+          <div class="node-sub" style="margin-top:6px">需要大量反事实训练数据，是架构中最具挑战性的部分。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">为什么这是"鹦鹉"到"理解"最关键的一步</div>
+    <div class="section-body">
+      <p>没有因果推断，系统只能记住"A 和 B 经常一起出现"。有了因果推断，系统可以回答"如果 A 不存在，B 还会发生吗"。这是真正理解世界的基础，也是规划和干预能力的前提。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── REWARD ── -->
+<div id="panel-reward" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-reward-dim)">◎</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-reward)">内部奖励计算器</div>
+      <div class="detail-meta">
+        <span class="tag-reward" style="padding:2px 8px;border-radius:3px">新增模块</span>
+        <span>驱动 C₋₁ 元目标层</span>
+        <span>不依赖外部标注</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">三个奖励分量</div>
+    <div class="section-body">
+      <div class="props">
+        <div class="prop" style="border:1px solid rgba(212,107,107,0.2)">
+          <div class="prop-key">r₁ 好奇心奖励</div>
+          <div class="prop-val">r₁ = |预测误差|</div>
+          <div class="node-sub" style="margin-top:6px">高预测误差 = 遇到新事物 = 有探索价值。驱动系统主动寻找不确定区域。</div>
+        </div>
+        <div class="prop" style="border:1px solid rgba(212,107,107,0.2)">
+          <div class="prop-key">r₂ 任务完成奖励</div>
+          <div class="prop-val">r₂ = 目标达成度</div>
+          <div class="node-sub" style="margin-top:6px">稀疏奖励 + 成型（shaping）。衡量 C₋₁ 产生的目标是否被实现。</div>
+        </div>
+        <div class="prop" style="border:1px solid rgba(212,107,107,0.2)">
+          <div class="prop-key">r₃ 一致性奖励</div>
+          <div class="prop-val">r₃ = 状态一致性</div>
+          <div class="node-sub" style="margin-top:6px">惩罚自相矛盾的内部状态，鼓励连贯、一致的世界模型。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">总奖励公式</div>
+          <div class="prop-val">R = α·r₁ + β·r₂ + γ·r₃</div>
+          <div class="node-sub" style="margin-top:6px">权重 α, β, γ 可学习，在阶段E中自动调整以平衡探索与利用。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">信号流向</div>
+    <div class="section-body">
+      <div class="code-block">C₃ 概念状态
+    ↓
+内部奖励计算器 → R = α·r₁ + β·r₂ + γ·r₃
+    ↓
+C₋₁ 元目标层（更新目标向量）
+    ↓
+场景路由器（偏置激活权重）  ← 目标驱动注意力</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">局限性</div>
+    <div class="section-body">
+      <p>内部奖励的定义本身（好奇心、任务完成、一致性）仍然是人工设计的。这意味着系统的"内在动机"终究是对人工奖励函数的优化，而非真正自主涌现的欲望。这个边界目前无法突破。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── EMBEDDER ── -->
+<div id="panel-embedder" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-orig-dim)">◻</div>
+    <div>
+      <div class="detail-title">多模态嵌入层</div>
+      <div class="detail-meta">
+        <span class="tag-orig" style="padding:2px 8px;border-radius:3px">原有模块</span>
+        <span>编码阶段执行一次</span>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">功能</div>
+    <div class="section-body">
+      <p>将不同模态的原始输入映射到同一状态空间。训练目标是使配对的多模态输入在状态空间中占据相近位置（对比学习 + 循环一致性）。</p>
+      <div class="tag-list">
+        <span class="tag">E_vision: image → ℝ^D</span>
+        <span class="tag">E_audio: audio → ℝ^D</span>
+        <span class="tag">E_text: text → ℝ^D</span>
+        <span class="tag">E_action: action → ℝ^D</span>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">v2 的变化</div>
+    <div class="section-body">
+      <p>嵌入层本身无改动。但嵌入结果现在同时进入 C₋₁（目标层）和因果图层 G，以便 G 能从输入模式中识别潜在因果结构。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── SCENE ── -->
+<div id="panel-scene" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-core-dim)">◈</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-core)">场景感知稀疏激活</div>
+      <div class="detail-meta">
+        <span class="tag-core" style="padding:2px 8px;border-radius:3px">核心改进</span>
+        <span>新增目标驱动路由</span>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">原有机制（保留）</div>
+    <div class="section-body">
+      <p>64个可学习场景原型 · Gumbel-Softmax 可微选择 · 温度退火 5.0→0.5 · 激活 40–55% 维度。</p>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">改进：C₋₁ 反向调制</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">原有路由逻辑</div>
+          <p>路由权重 = f(当前输入)<br>"我看到什么" → 激活哪些维度</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">改进后路由逻辑</div>
+          <p>路由权重 = f(当前输入) + g(C₋₁目标向量)<br>"我想做什么"也参与激活决策</p>
+        </div>
+      </div>
+      <p style="margin-top:12px">这个改动使注意力从被动响应变为可被目标主动引导——系统不只响应"发生了什么"，也响应"我想要什么"。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── MAMBA ── -->
+<div id="panel-mamba" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-core-dim)">≋</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-core)">S_obj 对象层 Mamba</div>
+      <div class="detail-meta">
+        <span class="tag-core" style="padding:2px 8px;border-radius:3px">核心改进</span>
+        <span>A 矩阵受 S_meta 调制</span>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">改进后的状态更新方程</div>
+    <div class="section-body">
+      <div class="code-block">// 原有方程
+S' = A · S + B · x + ControlNet(c)
+
+// 改进后
+S' = (A_base + ΔA) · S + B · x + ControlNet(c)
+y  = C · S'
+
+// 其中 ΔA 由 S_meta 每 N 步提供一次
+// A_base 是可学习的基础转移矩阵
+// ΔA 是元认知层对动力学的实时调整</div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">ΔA 的含义</div>
+    <div class="section-body">
+      <p>A 矩阵决定系统"如何思考"——哪些信息长期保留、哪些快速衰减。S_meta 通过修改 ΔA，实质上改变了 S_obj 的记忆机制和思维习惯。这是架构中唯一真正的自我修改路径。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── CONCEPT ── -->
+<div id="panel-concept" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-orig-dim)">⋮</div>
+    <div>
+      <div class="detail-title">层次化概念空间</div>
+      <div class="detail-meta">
+        <span class="tag-orig" style="padding:2px 8px;border-radius:3px">原有模块</span>
+        <span>v2 中因果图 G 同步更新</span>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">层次结构</div>
+    <div class="section-body">
+      <div class="props">
+        <div class="prop">
+          <div class="prop-key">C₀ 抽象概念层</div>
+          <div class="prop-val">d = 64</div>
+          <div class="node-sub" style="margin-top:6px">意图、主题、情感基调、目标。现受 C₋₁ 调制。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">C₁ 中层概念层</div>
+          <div class="prop-val">d = 256</div>
+          <div class="node-sub" style="margin-top:6px">实体、关系、事件框架、概念原语（K≈4096）。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">C₂ 具体语义层</div>
+          <div class="prop-val">d = 512</div>
+          <div class="node-sub" style="margin-top:6px">语义属性、修饰、时态、语用特征。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">C₃ 实例化层</div>
+          <div class="prop-val">d = 1024</div>
+          <div class="node-sub" style="margin-top:6px">可直接投影为词序列。内部奖励计算从此层读取。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── OUTPUT ── -->
+<div id="panel-output" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-orig-dim)">→</div>
+    <div>
+      <div class="detail-title">输出投影层</div>
+      <div class="detail-meta">
+        <span class="tag-orig" style="padding:2px 8px;border-radius:3px">原有模块</span>
+        <span>按需执行</span>
+        <span>无独立解码器</span>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">直接状态投影</div>
+    <div class="section-body">
+      <div class="code-block">文本输出：  C₃ → Linear(d=1024, vocab_size) → 词概率分布
+图像输出：  C₂ → 扩散模型去噪 → 像素空间
+动作输出：  C₀ → 策略网络头 → 动作指令
+状态传输：  S_obj 直接序列化 → AI间通信（无需语言）</div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">设计哲学</div>
+    <div class="section-body">
+      <p>状态空间已包含所有必要信息。输出只是换基底——从状态基底变换到词表/像素/动作基底。没有独立的"语言模型"，语言能力是状态空间的涌现属性。</p>
+    </div>
+  </div>
+</div>
+
+</main>
+</div>
+
+<script>
+function nav(el, panelId) {
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  el.classList.add('active');
+  showPanel(panelId);
+}
+
+function go(panelId) {
+  const map = {
+    'embedder': 0, 'c-1': 2, 'causal': 3, 'concept': 8,
+    'scene': 5, 'meta': 4, 'mamba': 6, 'output': 9, 'reward': 4
+  };
+  const navItems = document.querySelectorAll('.nav-item');
+  const panelMap = {
+    'overview': 0, 'training': 1, 'c-1': 2, 'meta': 3,
+    'causal': 4, 'reward': 5, 'embedder': 6, 'scene': 7,
+    'mamba': 8, 'concept': 9, 'output': 10
+  };
+  navItems.forEach(n => n.classList.remove('active'));
+  const idx = panelMap[panelId];
+  if (navItems[idx]) navItems[idx].classList.add('active');
+  showPanel(panelId);
+}
+
+function showPanel(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  const el = document.getElementById('panel-' + id);
+  if (el) el.classList.add('active');
+}
+</script>
+</body>
+</html>
