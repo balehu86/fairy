@@ -91,7 +91,7 @@ class MetaCognition(nn.Module):
         delta_A = self.low_rank_delta_a(S_meta_new)
         # 单调循环: scale被abs()约束为正, bias可偏移
         loop_logit = torch.abs(self.loop_scale) * action_repeat + self.loop_bias
-        loop = torch.sigmoid(loop_logit)
+        loop = torch.sigmoid(loop_logit).unsqueeze(0)  # ← 加unsqueeze(0)变1维
         shared = self.interp_shared(torch.tensor([pred_err, confidence, entropy], device=dev))
         interp = torch.cat([loop, shared], dim=-1)
         return delta_A, S_meta_new, interp, loop_logit

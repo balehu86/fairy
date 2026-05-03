@@ -87,7 +87,7 @@ class CSMv3Agent(nn.Module):
         
         # 概念池: 读取 → 写入
         concept_read = self.concept_pool.read(h_enhanced, self.concept_pool_data)
-        threshold = 0.3 if self.phase >= 2 else 0.5
+        threshold = 2.0 if self.phase >= 2 else 3.0  # L2距离, P1高门槛少追加
         self.concept_pool_data = self.concept_pool.write(h_enhanced, self.concept_pool_data, threshold)
         
         delta_S_obj = self.S_obj - self.prev_S_obj
@@ -139,6 +139,11 @@ class CSMv3Agent(nn.Module):
         if ground_truth is not None:
             gt = torch.as_tensor(ground_truth, dtype=torch.float32, device=self.device)
             losses['causal_detect'] = F.binary_cross_entropy(var_probs, gt)
+        
+        # 概念池集中损失: 防止投影太散导致疯狂追加
+        if self.concept_pool_data.shape[0] > 1:
+            losses['pool_concentrate'] = self.concept_pool.concentration_loss(
+                h, self.concept_pool_data)
         
         if self.phase >= 2:
             if is_event_step and prev_ground_truth is not None and action_idx is not None:
