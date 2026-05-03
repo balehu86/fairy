@@ -1,3 +1,5 @@
+# train.py — v3 实证优化版
+
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -6,10 +8,11 @@ from collections import deque
 import time, json, os
 
 from env import CausalGridWorld
-from csm_agent import CSMv2Agent
+from csm_agent import CSMv3Agent
 from device_utils import DEVICE
 
 MIN_ENTROPY = 0.3
+
 
 def collect_episode(agent, env, max_steps=80):
     obs, gt = env.reset()
@@ -21,7 +24,8 @@ def collect_episode(agent, env, max_steps=80):
     prev_gt = None
     
     for step in range(max_steps):
-        out = agent(obs, ext_reward=0.0 if step==0 else transitions[-1]['reward'],
+        ext_r = 0.0 if step == 0 else transitions[-1]['reward']
+        out = agent(obs, ext_reward=ext_r,
                     action_taken=transitions[-1]['action_idx'] if step > 0 else None)
         
         dist = torch.distributions.Categorical(out['action_probs'])
@@ -50,7 +54,8 @@ def collect_episode(agent, env, max_steps=80):
             'reward': reward, 'value': out['value'],
             'aux_losses': aux_losses, 'interp': out['interp'],
             'pred_err': out['pred_err'], 'is_event': is_event,
-            'action_repeat': agent.action_repeat_count,  # 保存实际值
+            'action_repeat': agent.action_repeat_count,
+            'delta_A_mag': out['delta_A_mag'],
         })
         
         total_reward += reward
@@ -61,6 +66,7 @@ def collect_episode(agent, env, max_steps=80):
     
     return transitions, total_reward
 
+
 def compute_returns(transitions, gamma=0.99):
     returns = []
     R = 0.0
@@ -68,6 +74,7 @@ def compute_returns(transitions, gamma=0.99):
         R = t['reward'] + gamma * R
         returns.insert(0, R)
     return returns
+
 
 def update_agent(agent, optimizer, transitions,
                  entropy_coef=0.03, value_coef=0.5, aux_coef=0.3, interp_coef=0.3):
@@ -99,20 +106,19 @@ def update_agent(agent, optimizer, transitions,
     if aux_count > 0:
         loss = loss + aux_coef * total_aux / max(1, aux_count)
     
-    # interp 监督: 用连续 action_repeat, 不二值化
+    # interp 监督: 独立头 — loop_head 和 interp_shared 梯度自然分离
     interp_targets = []
     interp_outputs = []
     for i in range(1, len(transitions)):
         t = transitions[i]
         pe = t['pred_err']
         r = t['reward']
-        repeat = t['action_repeat']  # 连续值 0-20
+        repeat = t['action_repeat']
         
-        # 4 个 target — 连续化!
-        loop = min(repeat / 10.0, 1.0)  # 0→1, 跟输入一致
+        loop = min(repeat / 10.0, 1.0)
         conf = 1.0 - min(pe, 1.0)
         expl = min(pe * 3, 1.0)
-        explt = min(max(r, 0.0), 1.0)  # 正奖励归一化
+        explt = min(max(r, 0.0), 1.0)
         
         interp_targets.append([loop, conf, expl, explt])
         interp_outputs.append(t['interp'])
@@ -135,6 +141,7 @@ def update_agent(agent, optimizer, transitions,
         'entropy': entropy_bonus.item(),
     }
 
+
 def train(n_episodes=3000, seed=42):
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -142,31 +149,31 @@ def train(n_episodes=3000, seed=42):
         torch.cuda.manual_seed(seed)
     
     envs = [CausalGridWorld(seed=seed+i) for i in range(5)]
-    agent = CSMv2Agent()
+    agent = CSMv3Agent()
     
     optimizer = optim.Adam([
-        {'params': agent.encoder.parameters(), 'lr': 3e-4},
-        {'params': agent.obj_ssm.parameters(), 'lr': 3e-4},
-        {'params': agent.c2_proj.parameters(), 'lr': 3e-4},
-        {'params': agent.action_head.parameters(), 'lr': 3e-4},
-        {'params': agent.slot_mem.parameters(), 'lr': 3e-4},
-        {'params': agent.world_model.parameters(), 'lr': 3e-4},
-        {'params': agent.scene_router.parameters(), 'lr': 1e-4},
+        {'params': agent.encoder.parameters(),         'lr': 3e-4},
+        {'params': agent.obj_ssm.parameters(),         'lr': 3e-4},
+        {'params': agent.c2_proj.parameters(),         'lr': 3e-4},
+        {'params': agent.action_head.parameters(),     'lr': 3e-4},
+        {'params': agent.slot_mem.parameters(),        'lr': 3e-4},
+        {'params': agent.world_model.parameters(),     'lr': 3e-4},
+        {'params': agent.scene_router.parameters(),    'lr': 1e-4},
         {'params': agent.causal_graph.var_detector.parameters(), 'lr': 1e-4},
-        {'params': agent.causal_graph.action_effects, 'lr': 3e-4},
-        {'params': agent.causal_graph.var_causal_logits, 'lr': 3e-4},
-        {'params': agent.meta_cog.parameters(), 'lr': 5e-5},
-        {'params': agent.meta_goal.parameters(), 'lr': 5e-5},
+        {'params': agent.causal_graph.action_effects,  'lr': 3e-4},
+        {'params': agent.causal_graph.var_causal_logits,'lr': 3e-4},
+        {'params': agent.meta_cog.parameters(),         'lr': 5e-5},
+        {'params': agent.meta_goal.parameters(),        'lr': 5e-5},
     ], eps=1e-5)
     
     n_params = sum(p.numel() for p in agent.parameters())
-    print(f"[csm] 参数量: {n_params:,}")
-    print(f"[csm] 设备: {DEVICE}")
-    print(f"[csm] 修复: interp连续target(不再二值化)")
+    print(f"[csm v3] 参数量: {n_params:,}")
+    print(f"[csm v3] 设备: {DEVICE}")
+    print(f"[csm v3] 改动: LowRankDeltaA(秩4) + 独立interp头 + GatedSSM增强调制(0.3+状态扰动)")
     
     rewards_log = deque(maxlen=100)
     success_log = deque(maxlen=100)
-    history = {'episode': [], 'avg_reward': [], 'success_rate': [], 'phase': []}
+    history = {'episode': [], 'avg_reward': [], 'success_rate': [], 'phase': [], 'delta_A_mag': []}
     
     start = time.time()
     metrics = {'policy': 0, 'value': 0, 'entropy': 0}
@@ -185,26 +192,33 @@ def train(n_episodes=3000, seed=42):
         rewards_log.append(total_r)
         success_log.append(1.0 if total_r > 0.5 else 0.0)
         
+        # ΔA 幅度追踪
+        da_mags = [t['delta_A_mag'] for t in traj if t['delta_A_mag'] > 0]
+        avg_da = np.mean(da_mags) if da_mags else 0.0
+        
         if (ep+1) % 100 == 0:
             avg_r = np.mean(rewards_log)
             succ = np.mean(success_log)
             elapsed = time.time() - start
             vram = f"{torch.cuda.memory_allocated()/1024**2:.0f}MB" if torch.cuda.is_available() else "N/A"
-            print(f"[csm] Ep {ep+1}/{n_episodes} P{agent.phase} | "
+            da_info = f" | ΔA: {avg_da:.4f}" if agent.phase >= 3 else ""
+            print(f"[csm v3] Ep {ep+1}/{n_episodes} P{agent.phase} | "
                   f"AvgR: {avg_r:.3f} | Succ: {succ:.2%} | "
-                  f"Ent: {metrics['entropy']:.3f} | "
+                  f"Ent: {metrics['entropy']:.3f}{da_info} | "
                   f"VRAM: {vram} | Time: {elapsed:.1f}s")
             history['episode'].append(ep+1)
             history['avg_reward'].append(float(avg_r))
             history['success_rate'].append(float(succ))
             history['phase'].append(agent.phase)
+            history['delta_A_mag'].append(float(avg_da))
     
     os.makedirs('results', exist_ok=True)
-    with open('results/csm_history.json', 'w') as f:
+    with open('results/csm_v3_history.json', 'w') as f:
         json.dump(history, f, indent=2)
-    torch.save(agent.state_dict(), 'results/csm_model.pt')
-    print(f"[csm] 训练完成, 总耗时: {time.time()-start:.1f}s")
+    torch.save(agent.state_dict(), 'results/csm_v3_model.pt')
+    print(f"[csm v3] 训练完成, 总耗时: {time.time()-start:.1f}s")
     return history
+
 
 if __name__ == '__main__':
     train()

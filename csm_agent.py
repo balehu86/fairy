@@ -1,3 +1,5 @@
+# csm_agent.py — v3 实证优化版
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,7 +8,8 @@ from collections import deque
 from modules import *
 from device_utils import DEVICE
 
-class CSMv2Agent(nn.Module):
+
+class CSMv3Agent(nn.Module):
     def __init__(self, obs_dim=56, n_actions=6):
         super().__init__()
         H = 64
@@ -17,7 +20,7 @@ class CSMv2Agent(nn.Module):
         self.meta_goal = MetaGoalLayer(H, goal_dim=8)
         self.scene_router = SparseSceneRouter(H, n_scenes=16)
         self.obj_ssm = GatedSSM(H, state_dim=32)
-        self.meta_cog = MetaCognition(obj_state_dim=32, meta_state_dim=16)
+        self.meta_cog = MetaCognition(obj_state_dim=32, meta_state_dim=16, delta_rank=4)
         self.slot_mem = SlotMemory(slot_dim=H, n_slots=4)
         self.causal_graph = CausalGraph(n_vars=4, n_actions=n_actions, state_dim=H)
         
@@ -43,6 +46,7 @@ class CSMv2Agent(nn.Module):
         self.prev_action_oh = None
         self.last_action = -1
         self.action_repeat_count = 0.0
+        self.last_delta_A = None
     
     def compute_learning_progress(self):
         if len(self.pred_err_history) < 20: return 0.0
@@ -78,14 +82,15 @@ class CSMv2Agent(nn.Module):
         h_enhanced, scene_weights = self.scene_router(h, goal)
         
         delta_S_obj = self.S_obj - self.prev_S_obj
-        confidence = 1.0 - min(pred_err, 1.0)
         entropy_val = -(scene_weights * torch.log(scene_weights + 1e-8)).sum().item()
-        delta_signal, self.S_meta, interp = self.meta_cog(
-            delta_S_obj.detach(), normed_repeat, pred_err, confidence, entropy_val, self.S_meta
+        delta_A, self.S_meta, interp = self.meta_cog(
+            delta_S_obj.detach(), normed_repeat, pred_err, entropy_val, ext_reward, self.S_meta
         )
-        if self.phase < 3: delta_signal = delta_signal * 0
+        if self.phase < 3:
+            delta_A = delta_A * 0
+        self.last_delta_A = delta_A.detach().clone() if self.phase >= 3 else None
         
-        y_ssm, self.S_obj = self.obj_ssm(h_enhanced, self.S_obj, delta_signal)
+        y_ssm, self.S_obj = self.obj_ssm(h_enhanced, self.S_obj, delta_A)
         slot_read, self.slots = self.slot_mem(h_enhanced, self.slots)
         c2 = self.c2_proj(torch.cat([self.S_obj, slot_read, h]))
         
@@ -101,6 +106,7 @@ class CSMv2Agent(nn.Module):
             'action_probs': action_probs, 'value': value,
             'interp': interp, 'var_probs': var_probs,
             'curiosity': curiosity, 'pred_err': pred_err, 'h': h,
+            'delta_A_mag': delta_A.detach().abs().mean().item() if self.phase >= 3 else 0.0,
         }
     
     def set_prev_action(self, action):
@@ -126,13 +132,10 @@ class CSMv2Agent(nn.Module):
                 gt_delta = torch.as_tensor(ground_truth, dtype=torch.float32, device=self.device) - \
                            torch.as_tensor(prev_ground_truth, dtype=torch.float32, device=self.device)
                 if gt_delta.abs().sum() > 0.05:
-                    # action→var 监督
                     losses['event_supervision'] = self.causal_graph.event_supervision_loss(
                         action_idx, gt_delta) * 5.0
-                    # var→var 共现监督 (关键新增!)
                     losses['var_causal'] = self.causal_graph.var_causal_supervision_loss(gt_delta) * 3.0
             
-            # sparsity (温和)
             losses['causal_sparse'] = self.causal_graph.sparsity_loss() * 0.1
         
         return losses

@@ -1,0 +1,1399 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>概念状态机 v3 — 实证优化架构</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0e0f11;
+  --bg2: #141518;
+  --bg3: #1a1c21;
+  --border: #2a2d35;
+  --border2: #363a45;
+  --text: #d4d6dc;
+  --text2: #8a8e9a;
+  --text3: #555a68;
+  --acc-kept: #e8a44a;
+  --acc-fix: #5bbfa0;
+  --acc-new: #7c9ee8;
+  --acc-warn: #d46b6b;
+  --acc-lora: #c084fc;
+  --acc-kept-dim: rgba(232,164,74,0.12);
+  --acc-fix-dim: rgba(91,191,160,0.12);
+  --acc-new-dim: rgba(124,158,232,0.12);
+  --acc-warn-dim: rgba(212,107,107,0.12);
+  --acc-lora-dim: rgba(192,132,252,0.12);
+  --mono: 'IBM Plex Mono', monospace;
+  --serif: 'Noto Serif SC', serif;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+.shell {
+  display: grid;
+  grid-template-columns: 270px 1fr;
+  grid-template-rows: 56px 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+header {
+  grid-column: 1 / -1;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  gap: 16px;
+  background: var(--bg2);
+}
+.logo-mark { font-size: 11px; color: var(--text3); letter-spacing: 0.15em; text-transform: uppercase; }
+header h1 { font-family: var(--serif); font-size: 15px; font-weight: 600; color: var(--text); letter-spacing: 0.02em; }
+.version-tag { font-size: 10px; padding: 2px 8px; border: 1px solid var(--acc-fix); color: var(--acc-fix); border-radius: 2px; letter-spacing: 0.08em; }
+.legend { margin-left: auto; display: flex; gap: 16px; align-items: center; }
+.leg { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text2); }
+.leg-dot { width: 8px; height: 8px; border-radius: 1px; }
+nav {
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 16px 0;
+}
+.nav-section {
+  padding: 4px 16px 8px;
+  font-size: 10px;
+  color: var(--text3);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-top: 8px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  cursor: pointer;
+  color: var(--text2);
+  font-size: 12px;
+  border-left: 2px solid transparent;
+  transition: all 0.15s;
+  user-select: none;
+}
+.nav-item:hover { background: var(--bg3); color: var(--text); }
+.nav-item.active { color: var(--text); background: var(--bg3); }
+.nav-item.active.kept { border-left-color: var(--acc-kept); color: var(--acc-kept); }
+.nav-item.active.fix  { border-left-color: var(--acc-fix);  color: var(--acc-fix);  }
+.nav-item.active.new  { border-left-color: var(--acc-new);  color: var(--acc-new);  }
+.nav-item.active.lora { border-left-color: var(--acc-lora); color: var(--acc-lora); }
+.nav-type {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 2px;
+  margin-left: auto;
+  letter-spacing: 0.06em;
+}
+.tag-kept { background: var(--acc-kept-dim); color: var(--acc-kept); }
+.tag-fix  { background: var(--acc-fix-dim);  color: var(--acc-fix);  }
+.tag-new  { background: var(--acc-new-dim);  color: var(--acc-new);  }
+.tag-lora { background: var(--acc-lora-dim); color: var(--acc-lora); }
+main {
+  overflow-y: auto;
+  padding: 32px 40px;
+  background: var(--bg);
+}
+.panel { display: none; }
+.panel.active { display: block; }
+.diagram { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.row { display: flex; gap: 3px; align-items: stretch; }
+.node {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  background: var(--bg2);
+  position: relative;
+}
+.node:hover { border-color: var(--border2); background: var(--bg3); }
+.node.selected { border-color: var(--acc-fix) !important; }
+.node.kept  { border-color: rgba(232,164,74,0.35); background: var(--acc-kept-dim); }
+.node.fix   { border-color: rgba(91,191,160,0.35); background: var(--acc-fix-dim); }
+.node.new   { border-color: rgba(124,158,232,0.35); background: var(--acc-new-dim); }
+.node.lora  { border-color: rgba(192,132,252,0.35); background: var(--acc-lora-dim); }
+.node.warn  { border-color: rgba(212,107,107,0.35); background: var(--acc-warn-dim); }
+.node.kept:hover  { border-color: var(--acc-kept); }
+.node.fix:hover   { border-color: var(--acc-fix); }
+.node.new:hover   { border-color: var(--acc-new); }
+.node.lora:hover  { border-color: var(--acc-lora); }
+.node.warn:hover  { border-color: var(--acc-warn); }
+.node-title { font-weight: 500; font-size: 12px; margin-bottom: 2px; }
+.node.kept .node-title { color: var(--acc-kept); }
+.node.fix  .node-title { color: var(--acc-fix); }
+.node.new  .node-title { color: var(--acc-new); }
+.node.lora .node-title { color: var(--acc-lora); }
+.node.warn .node-title { color: var(--acc-warn); }
+.node-sub { color: var(--text3); font-size: 11px; }
+.node-badge { font-size: 9px; padding: 1px 5px; border-radius: 2px; margin-left: 6px; vertical-align: middle; }
+.full { flex: 1; }
+.half { flex: 1; }
+.arrow-row {
+  display: flex; justify-content: center; color: var(--text3);
+  font-size: 16px; line-height: 1; padding: 1px 0; position: relative;
+}
+.skip-line {
+  position: absolute;
+  right: 40px;
+  top: -8px;
+  font-size: 10px;
+  color: var(--acc-fix);
+  border: 1px dashed rgba(91,191,160,0.4);
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(91,191,160,0.06);
+}
+.dashed-row { display: flex; gap: 3px; }
+.feedback-line {
+  border: 1px dashed var(--border2); border-radius: 4px;
+  padding: 5px 14px; font-size: 11px; color: var(--text3);
+  flex: 1; display: flex; align-items: center; gap: 8px;
+}
+.feedback-line::before { content: '↺'; color: var(--acc-kept); }
+.detail-header { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 28px; }
+.detail-icon {
+  width: 40px; height: 40px; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; flex-shrink: 0;
+}
+.detail-title { font-family: var(--serif); font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+.detail-meta { font-size: 11px; color: var(--text3); display: flex; gap: 12px; flex-wrap: wrap; }
+.detail-meta span { display: flex; align-items: center; gap: 4px; }
+.section { margin-bottom: 24px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.section-head {
+  background: var(--bg2); padding: 8px 16px; font-size: 10px;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--text3);
+  border-bottom: 1px solid var(--border);
+}
+.section-body { padding: 16px; }
+.section-body p { color: var(--text2); line-height: 1.75; margin-bottom: 10px; }
+.section-body p:last-child { margin-bottom: 0; }
+.props { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.prop { background: var(--bg3); border-radius: 4px; padding: 10px 12px; }
+.prop-key { color: var(--text3); font-size: 11px; margin-bottom: 4px; }
+.prop-val { color: var(--text); font-size: 12px; font-weight: 500; }
+.code-block {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
+  padding: 14px 16px; font-family: var(--mono); font-size: 12px;
+  color: var(--acc-fix); line-height: 1.8; overflow-x: auto; white-space: pre;
+}
+.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.compare-card { border-radius: 4px; padding: 12px 14px; }
+.compare-card.before { background: rgba(212,107,107,0.08); border: 1px solid rgba(212,107,107,0.2); }
+.compare-card.after  { background: rgba(91,191,160,0.08);  border: 1px solid rgba(91,191,160,0.2);  }
+.compare-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px; }
+.compare-card.before .compare-label { color: var(--acc-warn); }
+.compare-card.after  .compare-label { color: var(--acc-fix); }
+.compare-card p { font-size: 12px; color: var(--text2); line-height: 1.7; }
+.overview-intro { margin-bottom: 28px; }
+.overview-intro h2 { font-family: var(--serif); font-size: 22px; font-weight: 600; margin-bottom: 8px; }
+.overview-intro p { color: var(--text2); line-height: 1.75; max-width: 640px; }
+.hint { font-size: 11px; color: var(--text3); margin-top: 12px; }
+.stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 28px; }
+.stat { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; }
+.stat-num { font-family: var(--serif); font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+.stat-label { font-size: 11px; color: var(--text3); }
+.timeline { display: flex; flex-direction: column; gap: 3px; }
+.phase {
+  display: flex; gap: 16px; align-items: flex-start;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 14px 16px; cursor: default; transition: border-color 0.15s;
+}
+.phase:hover { border-color: var(--border2); }
+.phase.fix-phase { border-color: rgba(91,191,160,0.3); background: var(--acc-fix-dim); }
+.phase-label { font-size: 11px; font-weight: 500; min-width: 60px; padding-top: 1px; }
+.phase.fix-phase .phase-label { color: var(--acc-fix); }
+.phase-content { flex: 1; }
+.phase-title { font-weight: 500; margin-bottom: 4px; }
+.phase-desc { color: var(--text2); font-size: 11px; line-height: 1.65; }
+.phase-dur { font-size: 10px; color: var(--text3); margin-left: auto; min-width: 70px; text-align: right; padding-top: 2px; }
+.evidence {
+  background: rgba(91,191,160,0.06);
+  border: 1px solid rgba(91,191,160,0.2);
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.65;
+}
+.evidence::before { content: '📊 实证: '; color: var(--acc-fix); font-weight: 500; }
+.must-not {
+  background: rgba(212,107,107,0.06);
+  border: 1px solid rgba(212,107,107,0.2);
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.65;
+}
+.must-not::before { content: '⛔ 禁忌: '; color: var(--acc-warn); font-weight: 500; }
+.tag-list { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.tag { font-size: 11px; padding: 3px 10px; border-radius: 3px; background: var(--bg3); border: 1px solid var(--border); color: var(--text2); }
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+<header>
+  <span class="logo-mark">CSM</span>
+  <h1>概念状态机 — 实证优化架构</h1>
+  <span class="version-tag">v3.0</span>
+  <div class="legend">
+    <div class="leg"><div class="leg-dot" style="background:var(--acc-kept)"></div>保留原设计</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--acc-fix)"></div>实证修正</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--acc-new)"></div>新增模块</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--acc-lora)"></div>低秩ΔA</div>
+    <div class="leg"><div class="leg-dot" style="background:var(--acc-warn)"></div>废弃方案</div>
+  </div>
+</header>
+
+<nav>
+  <div class="nav-section">概览</div>
+  <div class="nav-item active fix" data-panel="overview" onclick="nav(this,'overview')">
+    <span>总体架构</span>
+    <span class="nav-type tag-fix">优化</span>
+  </div>
+  <div class="nav-item" data-panel="training" onclick="nav(this,'training')">
+    <span>训练范式</span>
+    <span class="nav-type tag-fix">三阶段</span>
+  </div>
+  <div class="nav-item" data-panel="rules" onclick="nav(this,'rules')">
+    <span>设计铁律</span>
+    <span class="nav-type tag-warn" style="background:var(--acc-warn-dim);color:var(--acc-warn)">9轮教训</span>
+  </div>
+
+  <div class="nav-section">实证修正</div>
+  <div class="nav-item fix" data-panel="gatedssm" onclick="nav(this,'gatedssm')">
+    <span>GatedSSM 核心</span>
+    <span class="nav-type tag-fix">替代Mamba</span>
+  </div>
+  <div class="nav-item fix" data-panel="scene" onclick="nav(this,'scene')">
+    <span>加法增强路由</span>
+    <span class="nav-type tag-fix">替代乘法掩码</span>
+  </div>
+  <div class="nav-item fix" data-panel="skip" onclick="nav(this,'skip')">
+    <span>跳跃连接</span>
+    <span class="nav-type tag-fix">最大单项改进</span>
+  </div>
+  <div class="nav-item lora" data-panel="lora-delta-a" onclick="nav(this,'lora-delta-a')">
+    <span>低秩 ΔA 机制</span>
+    <span class="nav-type tag-lora">替代全秩ΔA</span>
+  </div>
+
+  <div class="nav-section">新增模块</div>
+  <div class="nav-item new" data-panel="c-1" onclick="nav(this,'c-1')">
+    <span>C₋₁ 元目标层</span>
+    <span class="nav-type tag-new">新增</span>
+  </div>
+  <div class="nav-item new" data-panel="causal" onclick="nav(this,'causal')">
+    <span>因果图层 G</span>
+    <span class="nav-type tag-new">新增</span>
+  </div>
+  <div class="nav-item new" data-panel="meta" onclick="nav(this,'meta')">
+    <span>S_meta 元认知层</span>
+    <span class="nav-type tag-new">新增</span>
+  </div>
+  <div class="nav-item new" data-panel="reward" onclick="nav(this,'reward')">
+    <span>内部奖励</span>
+    <span class="nav-type tag-new">新增</span>
+  </div>
+  <div class="nav-item new" data-panel="interp" onclick="nav(this,'interp')">
+    <span>可解释信号</span>
+    <span class="nav-type tag-new">独立头</span>
+  </div>
+
+  <div class="nav-section">原有模块</div>
+  <div class="nav-item kept" data-panel="embedder" onclick="nav(this,'embedder')">
+    <span>多模态嵌入层</span>
+    <span class="nav-type tag-kept">保留</span>
+  </div>
+  <div class="nav-item kept" data-panel="concept" onclick="nav(this,'concept')">
+    <span>层次概念空间</span>
+    <span class="nav-type tag-kept">保留+跳跃</span>
+  </div>
+  <div class="nav-item kept" data-panel="slot" onclick="nav(this,'slot')">
+    <span>槽位工作记忆</span>
+    <span class="nav-type tag-kept">保留</span>
+  </div>
+  <div class="nav-item kept" data-panel="output" onclick="nav(this,'output')">
+    <span>输出投影层</span>
+    <span class="nav-type tag-kept">保留</span>
+  </div>
+</nav>
+
+<main>
+
+<!-- ═══════════════ OVERVIEW ═══════════════ -->
+<div id="panel-overview" class="panel active">
+  <div class="overview-intro">
+    <h2>实证优化架构总览</h2>
+    <p>基于9轮实证迭代的架构修正。原始构想的高层方向全部正确——元目标、元认知、因果图、内部奖励——但训练稳定性问题被严重低估。本版将每个"理论优雅但实证崩溃"的设计替换为验证过的方案。</p>
+    <div class="hint">← 左侧导航查看各模块详情 · 节点可点击 · 绿色=修正 橙色=保留 紫色=低秩ΔA</div>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat">
+      <div class="stat-num" style="color:var(--acc-fix)">5</div>
+      <div class="stat-label">实证修正项</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num" style="color:var(--acc-kept)">4</div>
+      <div class="stat-label">保留原设计</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num" style="color:var(--acc-new)">5</div>
+      <div class="stat-label">新增模块</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num" style="color:var(--acc-warn)">4</div>
+      <div class="stat-label">废弃方案</div>
+    </div>
+  </div>
+
+  <div class="diagram">
+    <div class="row">
+      <div class="node kept full" onclick="go('embedder')">
+        <div class="node-title">多模态嵌入层</div>
+        <div class="node-sub">视觉 · 听觉 · 文本 · 动作 → 统一状态空间</div>
+      </div>
+    </div>
+
+    <div class="arrow-row">↓</div>
+
+    <div class="row">
+      <div class="node new half" onclick="go('c-1')">
+        <div class="node-title">C₋₁ 元目标层 <span class="node-badge tag-new">新增</span></div>
+        <div class="node-sub">学习进度型好奇心 · 能力缺口 · 课程控制</div>
+      </div>
+      <div class="node new half" onclick="go('causal')">
+        <div class="node-title">因果图层 G <span class="node-badge tag-new">新增</span></div>
+        <div class="node-sub">地面真值监督 · 共现+先验 · 事件步训练 · 反事实推理</div>
+      </div>
+    </div>
+
+    <div class="arrow-row">↓</div>
+
+    <div class="row">
+      <div class="node fix full" onclick="go('scene')">
+        <div class="node-title">场景感知加法增强 <span class="node-badge tag-fix">修正: 乘法→加法</span></div>
+        <div class="node-sub">h_out = h + α × enhancement · α = sigmoid(gate) · 初始化=恒等映射 · C₋₁目标驱动路由</div>
+      </div>
+    </div>
+
+    <div class="arrow-row">
+      ↓
+      <div class="skip-line">h 跳跃连接 → 直通 c2</div>
+    </div>
+
+    <div class="row">
+      <div class="node new half" onclick="go('meta')">
+        <div class="node-title">S_meta 元认知 <span class="node-badge tag-new">新增</span></div>
+        <div class="node-sub">输入: ΔS_obj + 标量信号(非原始S_obj!) · 输出: 低秩ΔA + 独立interp头</div>
+      </div>
+      <div class="node fix half" onclick="go('gatedssm')">
+        <div class="node-title">S_obj GatedSSM <span class="node-badge tag-fix">修正: 裸递归→门控</span></div>
+        <div class="node-sub">z=遗忘门 · r=重置门(受ΔA调制) · S'=(1-z)S + z·tanh(W·[x,r·S]) · 低秩ΔA修改动力学</div>
+      </div>
+    </div>
+
+    <div class="arrow-row">↓</div>
+
+    <div class="row">
+      <div class="node kept full" onclick="go('concept')">
+        <div class="node-title">层次概念空间 C₀→C₃ <span class="node-badge tag-kept">保留</span> <span class="node-badge tag-fix">+层间跳跃</span></div>
+        <div class="node-sub">抽象 d=64 → 中层 d=256 → 语义 d=512 → 实例 d=1024 · 每层都有到输出的跳跃连接</div>
+      </div>
+    </div>
+
+    <div class="arrow-row">↓</div>
+
+    <div class="row">
+      <div class="node new half" onclick="go('reward')">
+        <div class="node-title">内部奖励 <span class="node-badge tag-new">新增</span></div>
+        <div class="node-sub">学习进度(非原始误差!) · 任务完成度 · 一致性 · 封顶0.5</div>
+      </div>
+      <div class="node new half" onclick="go('interp')">
+        <div class="node-title">可解释信号 <span class="node-badge tag-new">新增</span></div>
+        <div class="node-sub">循环: 独立头(仅action_repeat输入) · 置信/探索/利用: 共享头(3标量输入)</div>
+      </div>
+    </div>
+
+    <div class="dashed-row" style="margin-top:3px">
+      <div class="feedback-line">内部奖励 + interp → 反馈至 C₋₁ 和 S_meta</div>
+    </div>
+
+    <div class="arrow-row">
+      ↓
+      <div class="skip-line">所有层跳跃汇聚</div>
+    </div>
+
+    <div class="row">
+      <div class="node fix full" onclick="go('skip')">
+        <div class="node-title">跳跃汇聚 + 输出投影 <span class="node-badge tag-fix">修正: 无跳跃→ResNet式</span></div>
+        <div class="node-sub">c2 = Linear(S_obj, slot_read, h) · 文本/图像/动作/状态传输 · 即使上层全失败，信息通过h直通</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ TRAINING ═══════════════ -->
+<div id="panel-training" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-fix-dim)">⬡</div>
+    <div>
+      <div class="detail-title">训练范式（三阶段课程）</div>
+      <div class="detail-meta">
+        <span>原五阶段→三阶段</span>
+        <span>课程解决鸡生蛋问题</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">为什么需要课程</div>
+    <div class="section-body">
+      <p>S_meta需要S_obj先学会做事才能学到元认知，但S_meta的干扰又让S_obj学不会。因果图需要检测器先学会变量才能训转移。这就是鸡生蛋问题——全开则全废。课程让每个模块在前置就绪后再启动。</p>
+    </div>
+  </div>
+
+  <div class="timeline">
+    <div class="phase fix-phase">
+      <div class="phase-label" style="color:var(--acc-fix)">阶段 1</div>
+      <div class="phase-content">
+        <div class="phase-title">核心路径训练</div>
+        <div class="phase-desc">Encoder · GatedSSM · ActionHead · WorldModel · SlotMemory · 因果检测器(BCE监督)<br><strong style="color:var(--acc-warn)">冻结</strong>: S_meta干预(ΔA=0) · 目标调制(goal*=0) · 因果转移预测 · interp辅助监督</div>
+      </div>
+      <div class="phase-dur">0–800 ep</div>
+    </div>
+    <div class="phase fix-phase">
+      <div class="phase-label" style="color:var(--acc-fix)">阶段 2</div>
+      <div class="phase-content">
+        <div class="phase-title">因果推理训练</div>
+        <div class="phase-desc">解锁因果转移预测 · 事件步5-10x加权监督 · 共现监督var_adj · 先验初始化辅助 · sparsity仅对var_adj<br><strong style="color:var(--acc-warn)">冻结</strong>: S_meta干预 · 目标调制</div>
+      </div>
+      <div class="phase-dur">800–1600 ep</div>
+    </div>
+    <div class="phase fix-phase">
+      <div class="phase-label" style="color:var(--acc-fix)">阶段 3</div>
+      <div class="phase-content">
+        <div class="phase-title">元认知解锁</div>
+        <div class="phase-desc">解锁S_meta干预(低秩ΔA) · 解锁C₋₁目标调制 · interp独立头辅助监督 · 量化ΔA实际影响<br><strong style="color:var(--acc-fix)">全部活跃</strong></div>
+      </div>
+      <div class="phase-dur">1600+ ep</div>
+    </div>
+  </div>
+
+  <div class="section" style="margin-top:24px">
+    <div class="section-head">损失函数（实证优化版）</div>
+    <div class="section-body">
+      <div class="code-block">L = L_policy                          # REINFORCE + baseline
+  + 0.5 × L_value                     # MSE(V, normalized_returns)
+  + 0.03 × H(π)                       # 策略熵奖励
+  + max(0, 0.3-H) × 2.0              # 熵地板: 防策略坍缩
+  + 0.3 × (L_world + L_causal_detect) # 世界模型 + 检测器(BCE+GT)
+  # ── P2 阶段新增 ──
+  + 0.3 × L_event_supervision × 5.0  # 事件步直接监督action→var
+  + 0.3 × L_var_causal × 3.0         # 共现监督var→var
+  + 0.3 × L_causal_sparse × 0.1      # sparsity仅var_adj(绝不action_effects!)
+  # ── P1 起 ──
+  + 0.3 × L_interp                    # interp辅助MSE监督</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">与原五阶段的对应</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">原始: 过完备初始化→使用统计→剪枝→微调→自主探索</div>
+          <p>A: 3-6月预训练 B: 统计 C: 剪枝 D: 微调 E: 自主探索。5阶段有理论美感，但A阶段裸递归就崩溃了。</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">优化: 核心→因果→元认知</div>
+          <p>P1确保基础路径能工作，P2在检测器就绪后训因果转移，P3在S_obj稳定后解锁元认知。每阶段前置条件明确，不做假设。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ RULES ═══════════════ -->
+<div id="panel-rules" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-warn-dim)">⚠</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-warn)">设计铁律 — 9轮实证换来的禁忌</div>
+      <div class="detail-meta">
+        <span>每条背后都是一次失败</span>
+        <span>违反即崩溃</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">架构层铁律</div>
+    <div class="section-body">
+      <div class="must-not" style="margin-top:0">裸递归 S' = A·S + B·x → 特征值>1爆炸, <1消失。必须用门控结构 (1-z)·S + z·h_hat</div>
+      <div class="must-not">乘法掩码 h *= mask → 丢弃85%信息不可恢复。必须用加法增强 h + α·enhancement (初始化退化为恒等映射)</div>
+      <div class="must-not">模块串联无跳跃 → 串联瓶颈, 上游失败全部下游无信号。必须有跳跃连接让信息直通输出</div>
+      <div class="must-not">S_meta输入S_obj绝对值 → 步间不变导致SSM不动点。必须输入ΔS_obj (状态变化量)</div>
+      <div class="must-not">interp走SSM路径 → 恒定输入收敛到不动点, 丧失即时响应。interp必须走前馈路径</div>
+      <div class="must-not">interp多输出共享网络 → 梯度量级大的目标绑架量级小的(置信度绑架循环信号)。循环信号必须用独立输出头</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">训练层铁律</div>
+    <div class="section-body">
+      <div class="must-not" style="margin-top:0">每步训练因果转移 → 非事件步输出0→鼓励模型输出0, 事件步正梯度被淹没。必须只在事件步训练且5-10x加权</div>
+      <div class="must-not">sparsity同时作用于action_effects → 每步50次推力vs事件步3次正梯度, action_effects被推向0。sparsity仅对var_adj</div>
+      <div class="must-not">因果检测器无地面真值监督 → 纯自监督不知道该检测什么, 不收敛。必须BCE(var_probs, ground_truth)</div>
+      <div class="must-not">var_adj用间接梯度(predict_delta反传) → 所有边接受相同方向梯度→均匀0.47无法分化。必须用共现监督给每条边独立梯度+先验初始化</div>
+      <div class="must-not">action_effects走sigmoid → sigmoid(0)=0.5是梯度甜蜜点, 平衡在0.47。必须直接参数化从0开始, 只有正梯度推离0</div>
+      <div class="must-not">全模块同时训练 → 鸡生蛋: S_meta干扰S_obj, 因果图需检测器先就绪。必须课程训练</div>
+      <div class="must-not">好奇心用原始预测误差 → 电视效应: 随机噪声吸引注意力。必须用学习进度 max(0, 旧误差-新误差)</div>
+      <div class="must-not">奖励只有稀疏终点 → 94%episode无信号, 学不到因果链。必须加塑形奖励(靠近子目标+里程碑)</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">因果推理铁律</div>
+    <div class="section-body">
+      <div class="must-not" style="margin-top:0">预测绝对值 predict(var_probs) → 偏置≈target即可解, 无需学习转移。必须预测增量 delta</div>
+      <div class="must-not">var_adj无先验初始化 → 所有边从同一起点出发, 共现监督使所有相关边同时升高无法分化。必须先验初始化打破对称</div>
+      <div class="must-not">var_adj只用共现监督 → 共现无法区分因果方向(i→j vs j→i)。必须先验+共现组合, 或加入时序偏置</div>
+      <div class="must-not">var_adj全0.45时判断因果效应 → 均匀传播的假阳性, 任何干预等量影响所有变量。因果效应>0.6且var_adj分化才是真因果</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ GATED SSM ═══════════════ -->
+<div id="panel-gatedssm" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-fix-dim)">≋</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-fix)">S_obj GatedSSM 核心</div>
+      <div class="detail-meta">
+        <span class="tag-fix" style="padding:2px 8px;border-radius:3px">实证修正</span>
+        <span>替代裸递归 Mamba</span>
+        <span>state_dim=32</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">原始方案 vs 修正方案</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">原始: 裸递归 Mamba</div>
+          <p>S' = A·S + B·x + ControlNet(c)<br>A矩阵决定记忆衰减, 特征值>1→梯度爆炸, <1→消失。<br>理论优雅, 实证崩溃: Loss震荡 -0.3到1.5。</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">修正: GatedSSM</div>
+          <p>z = σ(W_z · [x, S])        // 遗忘门<br>r = σ(W_r · [x, S] + Δr)   // 重置门(受ΔA调制)<br>S' = (1-z)·S + z·tanh(W_h · [x, r·S])<br>稳定性保证: (1-z)∈[0,1] 约束特征值。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">完整状态更新方程</div>
+    <div class="section-body">
+      <div class="code-block">// 输入: x(64维), S_obj(32维)
+// ΔA: 来自 S_meta 的低秩调制信号
+
+combined = concat(x, S_obj)               // 96维
+z = sigmoid(W_z(combined))                 // 遗忘门: 控制保留多少旧状态
+r = sigmoid(W_r(combined) + delta_A_bias)  // 重置门: 受低秩ΔA调制
+h_hat = tanh(W_h(concat(x, r * S_obj)))    // 候选新状态
+S_obj' = (1 - z) * S_obj + z * h_hat      // 稳定更新
+y = output_proj(S_obj')                     // 32→64</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">ΔA 的两种调制方式</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">当前实现: 重置门偏置</div>
+          <p>delta_signal → r偏置 × 0.1<br>安全但影响弱: 只控制"忘多少", 不改变动力学基本结构<br>P3解锁后成功率无明显额外提升</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">优化方案: 低秩ΔA</div>
+          <p>ΔA = W_up(W_down(S_meta)) · σ(norm_gate)<br>秩=4, 谱范数可控, 既能修改动力学又防漂移<br>详见"低秩ΔA机制"面板</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="evidence">第1轮: 裸递归Loss震荡-0.3→1.5, 成功率12%。门控替代后Loss稳定收敛。门控的(1-z)∈[0,1]是稳定性保证——无论W怎么初始化, 特征值不会爆炸。</div>
+</div>
+
+<!-- ═══════════════ SCENE ROUTER ═══════════════ -->
+<div id="panel-scene" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-fix-dim)">◈</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-fix)">场景感知加法增强</div>
+      <div class="detail-meta">
+        <span class="tag-fix" style="padding:2px 8px;border-radius:3px">实证修正</span>
+        <span>替代乘法掩码</span>
+        <span>初始化=恒等映射</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">原始方案 vs 修正方案</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">原始: 乘法稀疏掩码</div>
+          <p>h_out = h * sparse_mask<br>激活40-55%维度, 其余归零<br>问题: 丢弃的信息无法恢复<br>第4轮实证: 信息瓶颈, 成功率卡在29%</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">修正: 加法增强</div>
+          <p>enhancement = Σ(weights_i × enh_vector_i)<br>α = sigmoid(gate(h, goal))<br>h_out = h + α × enhancement<br>关键: enhancement_vectors初始化为0, 所以h_out≈h</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">核心设计原则</div>
+    <div class="section-body">
+      <div class="props">
+        <div class="prop">
+          <div class="prop-key">初始化退化</div>
+          <div class="prop-val">h_out ≈ h (恒等映射)</div>
+          <div class="node-sub" style="margin-top:6px">训练前不丢信息, 学习是渐进增强不是先破坏再重建</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">门控强度</div>
+          <div class="prop-val">α = sigmoid(gate)</div>
+          <div class="node-sub" style="margin-top:6px">自适应控制增强幅度, 不确定时α≈0(保守)</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">目标驱动路由</div>
+          <div class="prop-val">C₋₁ goal → 权重偏置</div>
+          <div class="node-sub" style="margin-top:6px">"我想做什么"影响激活哪些场景原型</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">场景原型</div>
+          <div class="prop-val">16个可学习向量</div>
+          <div class="node-sub" style="margin-top:6px">余弦相似度 + goal偏置 → softmax权重 → 加权增强</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="evidence">第4轮: 乘法掩码→加法增强 + 跳跃连接 = 6%→69%。这是最大的单项改进。核心洞察: 深层模块应该是残差/增强, 不是替代(ResNet洞见适用于所有认知架构)。</div>
+</div>
+
+<!-- ═══════════════ SKIP CONNECTION ═══════════════ -->
+<div id="panel-skip" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-fix-dim)">→</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-fix)">跳跃连接系统</div>
+      <div class="detail-meta">
+        <span class="tag-fix" style="padding:2px 8px;border-radius:3px">实证修正</span>
+        <span>最大单项改进</span>
+        <span>ResNet洞见</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">设计原理</div>
+    <div class="section-body">
+      <p>原始架构是严格分层串联: 输入→嵌入→概念层→输出。任何一层失败, 下游全部无信号。这是串联瓶颈——系统可靠性等于各层可靠性之积。</p>
+      <p>ResNet的洞见: 深层模块应该是残差/增强, 不是替代。即使SSM、槽位、场景路由全失败, 信息通过h直通到ActionHead。高层模块在"不拖后腿"和"独立贡献"之间, 跳跃连接确保了至少"不拖后腿"。</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">跳跃连接点</div>
+    <div class="section-body">
+      <div class="code-block">h (64维) ─────────────────────────────────┐
+  │                                         │
+  ├──→ 场景路由(h+α·enh)                     │
+  │       │                                 │
+  │       ├──→ GatedSSM(S_obj)             │
+  │       │       │                         │
+  │       │       ├──→ c2 ─────────────────┤
+  │       │       │                         │
+  │       ├──→ SlotMemory(slot_read) ───────┤
+  │       │                                 │
+  └──→ c2 = Linear(S_obj, slot_read, h) ←──┘
+            32    +    64     +  64  = 160 → 64
+
+关键: h 必须在 c2 的输入中! 移除后成功率暴跌。</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">层次概念空间的层间跳跃</div>
+    <div class="section-body">
+      <p>原始C₀→C₁→C₂→C₃严格串联。优化后每层都有到输出的独立跳跃路径, 任何层级的抽象都能直接参与决策:</p>
+      <div class="code-block">C₀ (64维)  ──→ output_proj
+C₁ (256维) ──→ output_proj    // 每层独立跳跃
+C₂ (512维) ──→ output_proj    // 不依赖上层就能贡献
+C₃ (1024维)──→ output_proj</div>
+    </div>
+  </div>
+
+  <div class="evidence">第4轮: 加跳跃连接后 69%→79%(最终)。消融: 移除h跳跃后成功率暴跌。跳跃连接做了大部分重活, 高级模块从"拖后腿"向"独立贡献"过渡。</div>
+</div>
+
+<!-- ═══════════════ LOW-RANK ΔA ═══════════════ -->
+<div id="panel-lora-delta-a" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-lora-dim)">◈</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-lora)">低秩 ΔA 机制</div>
+      <div class="detail-meta">
+        <span class="tag-lora" style="padding:2px 8px;border-radius:3px">优化升级</span>
+        <span>替代全秩ΔA</span>
+        <span>LoRA-style</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">演进路径</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">原始构想: 全秩 ΔA</div>
+          <p>S' = (A + ΔA)·S + B·x<br>ΔA: 32×32 = 1024参数, 可完全改变A矩阵<br>危险: 微小扰动可导致特征值>1, 系统动力学崩溃<br>未实证验证</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">当前实现: 重置门偏置</div>
+          <p>delta_signal → r偏置 × 0.1<br>安全但弱: 只控制"忘多少", 不改变动力学<br>量化结果: P3解锁后无显著额外提升<br>调制幅度可能太小</p>
+        </div>
+      </div>
+      <div style="margin-top:16px; padding:12px 14px; background:var(--acc-lora-dim); border:1px solid rgba(192,132,252,0.3); border-radius:4px;">
+        <div style="font-size:10px; letter-spacing:0.1em; text-transform:uppercase; color:var(--acc-lora); margin-bottom:8px;">优化方案: 低秩 ΔA (LoRA-style)</div>
+        <p style="color:var(--text2); font-size:12px; line-height:1.7;">ΔA = W_up(W_down(S_meta)) · σ(norm_gate)<br>W_down: 16→4 (压缩), W_up: 4→32 (展开)<br>秩=4: 只影响4个主方向, 谱范数可控<br>σ(norm_gate): 自适应幅度控制, 防漂移<br><strong style="color:var(--text)">核心优势</strong>: 既能修改动力学(超越重置门偏置), 又通过低秩约束防止失控(超越全秩ΔA)</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">实现代码</div>
+    <div class="section-body">
+      <div class="code-block">class LowRankDeltaA(nn.Module):
+    def __init__(self, meta_dim=16, state_dim=32, rank=4):
+        super().__init__()
+        self.down = nn.Linear(meta_dim, rank)      # 16→4
+        self.up = nn.Linear(rank, state_dim)        # 4→32
+        self.norm_gate = nn.Linear(meta_dim, 1)     # 幅度控制
+        # 初始化: up.weight 接近0, ΔA初始≈0
+        nn.init.normal_(self.up.weight, 0, 0.01)
+        nn.init.zeros_(self.up.bias)
+
+    def forward(self, S_meta):
+        delta = self.up(self.down(S_meta))         # 32维
+        scale = torch.sigmoid(self.norm_gate(S_meta))  # [0,1]
+        return delta * scale                        # 自适应幅度
+
+# 在 GatedSSM 中使用:
+# r = sigmoid(W_r(combined) + delta_A)            # 重置门调制
+# S' = (1-z)*S + z*tanh(W_h @ [x, r*(A_base+ΔA)@S])  # 动力学调制</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">为什么低秩足够</div>
+    <div class="section-body">
+      <p>元认知不需要修改S_obj的每一个自由度。S_meta观察到"推理陷入循环"或"预测误差偏高"时, 需要调整的是少数几个动力学主方向——增大遗忘率、改变记忆保持策略。这些是低维操作, 秩4足以表达。</p>
+      <p>类比: LoRA在LLM微调中秩4-8就足以改变行为, 因为"任务适应"是低维操作。元认知对动力学的修改同样是低维操作。</p>
+    </div>
+  </div>
+
+  <div class="must-not">全秩ΔA: 32×32参数可完全改变A矩阵, 微小扰动导致特征值漂移→动力学崩溃。低秩约束+幅度控制是安全使用ΔA的必要条件。</div>
+</div>
+
+<!-- ═══════════════ C-1 ═══════════════ -->
+<div id="panel-c-1" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-new-dim)">◈</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-new)">C₋₁ 元目标层</div>
+      <div class="detail-meta">
+        <span class="tag-new" style="padding:2px 8px;border-radius:3px">新增模块</span>
+        <span>goal_dim=8</span>
+        <span>课程控制</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">功能</div>
+    <div class="section-body">
+      <p>让系统产生自己的"想做什么", 并反向调制场景路由器——将注意力从被动响应变为目标主动引导。这是从"工具"到"有限自主系统"最关键的结构性改变。</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">三个控制信号</div>
+    <div class="section-body">
+      <div class="props">
+        <div class="prop">
+          <div class="prop-key">好奇心信号</div>
+          <div class="prop-val" style="color:var(--acc-fix)">学习进度 (非原始预测误差!)</div>
+          <div class="node-sub" style="margin-top:6px">max(0, 旧10步平均误差 - 新10步平均误差)<br>原始构想用|预测误差|→电视效应, 随机噪声吸引注意力</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">能力缺口</div>
+          <div class="prop-val">近期负奖励统计</div>
+          <div class="node-sub" style="margin-top:6px">任务失败模式分析→识别不擅长的领域→针对性学习</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">外部奖励</div>
+          <div class="prop-val">环境即时奖励</div>
+          <div class="node-sub" style="margin-top:6px">环境反馈信号直接参与目标生成</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">课程控制</div>
+          <div class="prop-val" style="color:var(--acc-fix)">P1/P2: goal *= 0 (冻结)</div>
+          <div class="node-sub" style="margin-top:6px">目标调制在基础路径稳定前不启动, 防止干扰学习</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">输出与流向</div>
+    <div class="section-body">
+      <div class="code-block">signals = tensor([curiosity, capability_gap, ext_reward])  // 3维
+goal = tanh(Linear(h.detach(), signals))                     // 67→8
+
+// goal 流向:
+// 1. 场景路由器: goal_bias = goal_modulator(goal)  // 偏置场景权重
+// 2. P1/P2冻结: goal *= 0  // 不干扰基础学习</div>
+    </div>
+  </div>
+
+  <div class="evidence">好奇心信号用原始预测误差→电视效应(第3轮发现)。学习进度型好奇心: 误差下降=有趣, 误差不变=无趣, 误差上升=退步。防噪声吸引。</div>
+</div>
+
+<!-- ═══════════════ CAUSAL ═══════════════ -->
+<div id="panel-causal" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-new-dim)">⇢</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-new)">因果图层 G</div>
+      <div class="detail-meta">
+        <span class="tag-new" style="padding:2px 8px;border-radius:3px">新增模块</span>
+        <span>地面真值监督</span>
+        <span>共现+先验</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">三个子模块</div>
+    <div class="section-body">
+      <div class="props">
+        <div class="prop">
+          <div class="prop-key">变量检测器</div>
+          <div class="prop-val" style="color:var(--acc-fix)">BCE + 地面真值监督</div>
+          <div class="node-sub" style="margin-top:6px">var_probs = σ(Linear(h))  // 64→4<br>loss = BCE(var_probs, ground_truth)<br>纯自监督下不知道该检测什么!</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">动作→变量效果</div>
+          <div class="prop-val" style="color:var(--acc-fix)">直接参数化 + 事件步监督</div>
+          <div class="node-sub" style="margin-top:6px">action_effects = Parameter(zeros(6,4))<br>不走sigmoid! 从0开始, 只有正梯度推离0<br>只在因果变量变化的"事件步"训练, 5x权重</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">变量→变量因果</div>
+          <div class="prop-val" style="color:var(--acc-fix)">先验初始化 + 共现监督</div>
+          <div class="node-sub" style="margin-top:6px">var_causal_logits: 先验打破对称<br>BCE(var_adj, co_occurrence): 每条边独立梯度<br>两者缺一不可!</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">反事实推理</div>
+          <div class="prop-val">do() 干预推理</div>
+          <div class="node-sub" style="margin-top:6px">modified[i] = val → 切断入边 → 传播→结果<br>第9轮: 因果效应=0.699 (真实因果, 非假阳性)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">关键设计: 事件步训练</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">每步训练(失败)</div>
+          <p>80步episode中只有3-5步是事件步(因果变量变化)。其余步target=0→鼓励模型输出0。每步50次推力 vs 事件步3次正梯度, 信号被淹没。</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">事件步5x加权(成功)</div>
+          <p>只在因果变量变化时训练action_effects和var_adj。事件步5-10x权重补偿稀疏性。非事件步只训检测器BCE, 不训转移。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">关键设计: 先验 + 共现</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">只用间接梯度(失败)</div>
+          <p>predict_delta反传→所有边接受相同方向梯度→均匀0.47<br>第5-6轮: adj全0.47, 因果效应0.025(假阳性)</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">先验+共现(成功)</div>
+          <p>先验: logits[0,1]=2.0 (has_key→door_open应大)<br>共现: BCE(adj, co_occurrence_matrix) 每条边独立梯度<br>结果: key→door=0.807, deco→*=0.072</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">反事实推理实现</div>
+    <div class="section-body">
+      <div class="code-block">def counterfactual(var_probs, intervene_idx, intervene_val):
+    modified = var_probs.clone()
+    modified[intervene_idx] = intervene_val   # 强制干预
+    adj = get_var_adj().clone()
+    adj[:, intervene_idx] = 0                  # 切断入边(避免循环)
+    delta = modified - var_probs
+    propagated = delta @ adj                   # 因果传播
+    return clamp(var_probs + propagated, 0, 1)
+
+# 实证结果:
+# do(has_key=1) → door_open = 0.699
+# do(has_key=0) → door_open = 0.000
+# 因果效应 = 0.699 ← 真实因果!</div>
+    </div>
+  </div>
+
+  <div class="evidence">9轮实证最大的教训: 间接梯度是因果图的死敌, 直接监督+先验初始化是解药。共现监督给每条边独立方向, 但无法区分因果方向(i→j vs j→i)。先验弥补方向性。更复杂环境需加入时序偏置("i先变j后变→i→j方向更强")。</div>
+
+  <div class="must-not">action_effects走sigmoid → 平衡在0.47。sparsity作用于action_effects → 被推向0。var_adj无先验 → 无法分化。var_adj只用共现 → 无方向性。每步训因果转移 → 鼓励输出0。</div>
+</div>
+
+<!-- ═══════════════ META ═══════════════ -->
+<div id="panel-meta" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-new-dim)">⟳</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-new)">S_meta 元认知层</div>
+      <div class="detail-meta">
+        <span class="tag-new" style="padding:2px 8px;border-radius:3px">新增模块</span>
+        <span>state_dim=16</span>
+        <span>观察推理过程, 非外部数据</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">核心原则</div>
+    <div class="section-body">
+      <p>S_meta不处理外部输入, 只观察和干预<strong style="color:var(--text);font-weight:500">推理过程</strong>。它的输入不是S_obj本身, 而是S_obj的变化轨迹和过程指标。输出是低秩ΔA——直接修改S_obj的动力学参数。</p>
+      <p>这是架构中唯一真正的自我修改路径。系统不只"看到"自己, 还能改变自己的思维方式。</p>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">输入设计 (实证修正)</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">原始: S_obj绝对值</div>
+          <p>S_meta输入 = S_obj<br>问题: S_obj步间几乎不变→恒定输入→SSM不动点<br>第5轮: interp锁死0.5</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">修正: ΔS_obj + 标量信号</div>
+          <p>输入 = ΔS_obj(32) + action_repeat(1) + pred_err(1) + confidence(1) + entropy(1) = 36维<br>ΔS_obj在状态变化时非零, 循环时归零但repeat递增→两个信号互补</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">双路输出</div>
+    <div class="section-body">
+      <div class="props">
+        <div class="prop">
+          <div class="prop-key">ΔA路径 (SSM)</div>
+          <div class="prop-val" style="color:var(--acc-lora)">低秩ΔA → 修改S_obj动力学</div>
+          <div class="node-sub" style="margin-top:6px">需要时间平滑→走GatedSSM<br>每N步更新一次S_meta<br>通过重置门偏置+低秩ΔA调制S_obj</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">interp路径 (前馈)</div>
+          <div class="prop-val" style="color:var(--acc-fix)">独立输出头 → 可解释信号</div>
+          <div class="node-sub" style="margin-top:6px">必须走前馈! SSM恒定输入→不动点<br>循环信号: 独立头(仅action_repeat输入)<br>其他3信号: 共享头(3标量输入)<br>详见"可解释信号"面板</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">S_meta 内部结构</div>
+    <div class="section-body">
+      <div class="code-block">// 输入: ΔS_obj + 4标量 → trace_encoder → 16维
+trace = concat(ΔS_obj, action_repeat, pred_err, confidence, entropy)
+x = trace_encoder(trace)                    // 36→16
+
+// S_meta 状态更新 (GatedSSM, 16维)
+_, S_meta' = meta_ssm(x, S_meta)
+
+// 输出1: 低秩ΔA (修改S_obj动力学)
+ΔA = LowRankDeltaA(S_meta')                 // 16→4→32
+
+// 输出2: interp (前馈, 不走SSM!)
+// → 见"可解释信号"面板
+
+// 课程: P1/P2 阶段 ΔA *= 0 (冻结干预)</div>
+    </div>
+  </div>
+
+  <div class="must-not">S_meta输入S_obj绝对值 → 步间不变→SSM不动点。interp走SSM → 恒定输入收敛不动点。ΔA全秩 → 特征值漂移崩溃。P1阶段不冻结 → 干扰S_obj学习。</div>
+</div>
+
+<!-- ═══════════════ REWARD ═══════════════ -->
+<div id="panel-reward" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-new-dim)">◎</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-new)">内部奖励计算</div>
+      <div class="detail-meta">
+        <span class="tag-new" style="padding:2px 8px;border-radius:3px">新增模块</span>
+        <span>驱动C₋₁</span>
+        <span>不依赖外部标注</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">三个奖励分量 (实证修正)</div>
+    <div class="section-body">
+      <div class="props">
+        <div class="prop">
+          <div class="prop-key">r₁ 好奇心</div>
+          <div class="prop-val" style="color:var(--acc-fix)">学习进度 (非原始误差!)</div>
+          <div class="node-sub" style="margin-top:6px">原始构想: r₁=|预测误差| → 电视效应<br>修正: r₁=max(0, 旧误差-新误差)<br>误差下降=有趣, 误差不变=无趣</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">r₂ 任务完成</div>
+          <div class="prop-val">塑形奖励 + 里程碑</div>
+          <div class="node-sub" style="margin-top:6px">靠近子目标+0.1/步, 捡钥匙+0.5, 开门+0.5<br>只有终点+1.0太稀疏(94%无信号)</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">r₃ 一致性</div>
+          <div class="prop-val">状态一致性惩罚</div>
+          <div class="node-sub" style="margin-top:6px">惩罚自相矛盾的内部状态</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">封顶</div>
+          <div class="prop-val">R_internal = min(R, 0.5)</div>
+          <div class="node-sub" style="margin-top:6px">防好奇心奖励失控, 内部奖励不能压过任务奖励</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">信号流向</div>
+    <div class="section-body">
+      <div class="code-block">C₃ 概念状态 / h 编码
+    ↓
+内部奖励计算 → R = min(0.5, α·r₁ + β·r₂ + γ·r₃)
+    ↓
+C₋₁ 元目标层 (更新目标向量)
+    ↓
+场景路由器 (偏置激活权重)  ← 目标驱动注意力
+    ↓
+S_meta (好奇心=学习进度, 能力缺口=负奖励统计)</div>
+    </div>
+  </div>
+
+  <div class="evidence">第3轮: 只有宝藏+1.0奖励→94%无信号, agent学不到因果链。加塑形奖励后成功率从12%提升到29%。好奇心用原始误差→电视效应(随机噪声吸引注意力), 学习进度型好奇心解决这个问题。</div>
+</div>
+
+<!-- ═══════════════ INTERP ═══════════════ -->
+<div id="panel-interp" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-new-dim)">◉</div>
+    <div>
+      <div class="detail-title" style="color:var(--acc-new)">可解释信号 (interp)</div>
+      <div class="detail-meta">
+        <span class="tag-new" style="padding:2px 8px;border-radius:3px">新增模块</span>
+        <span style="color:var(--acc-fix)">独立输出头 (修正)</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">4维可解释信号</div>
+    <div class="section-body">
+      <div class="props">
+        <div class="prop">
+          <div class="prop-key">interp[0] 循环警告</div>
+          <div class="prop-val" style="color:var(--acc-fix)">独立输出头!</div>
+          <div class="node-sub" style="margin-top:6px">输入: 仅action_repeat(1维)<br>loop_head = Sigmoid(Linear(1))<br>target: min(repeat/10, 1.0)<br>必须独立! 共享网络被confidence绑架</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">interp[1] 置信度</div>
+          <div class="prop-val">共享头输出</div>
+          <div class="node-sub" style="margin-top:6px">target: 1 - min(pred_err, 1.0)<br>与pred_err线性相关(冗余)</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">interp[2] 需要探索</div>
+          <div class="prop-val">共享头输出</div>
+          <div class="node-sub" style="margin-top:6px">target: min(pred_err×3, 1.0)<br>高预测误差=需要探索</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">interp[3] 需要利用</div>
+          <div class="prop-val">共享头输出</div>
+          <div class="node-sub" style="margin-top:6px">target: min(max(reward,0), 1.0)<br>正奖励=利用当前策略</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">梯度绑架问题</div>
+    <div class="section-body">
+      <div class="compare-grid">
+        <div class="compare-card before">
+          <div class="compare-label">共享网络 (失败)</div>
+          <p>4个输出共享3→16→16→4网络<br>confidence的target≈0.9(高), loop的target≈0.3(低)<br>网络发现: loop输出低→降低pred_err关联→间接降低confidence的MSE<br>loop被牺牲: 0.086→0.039(方向反转!)</p>
+        </div>
+        <div class="compare-card after">
+          <div class="compare-label">独立头 (修正)</div>
+          <p>loop_head: Sigmoid(Linear(action_repeat, 1))<br>只有1个输入, 1个输出, 梯度路径完全独立<br>不会被confidence绑架<br>其他3个信号用共享头(3→8→3)</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">为什么前馈不走SSM</div>
+    <div class="section-body">
+      <p>SSM的动力学会让恒定输入的输出收敛到不动点。如果action_repeat连续20步为高值, SSM会适应这个"常态"并输出接近0——系统不再认为循环是异常。前馈路径保证输入变化→输出立即变化, 不受历史状态影响。</p>
+    </div>
+  </div>
+
+  <div class="evidence">第7-9轮: interp走SSM→不动点锁死0.5。输入含ΔS_obj→32/36维噪声淹没有效信号。共享网络→梯度绑架, 循环信号0.086→0.039方向反转。独立输出头是唯一验证过的解决方案。</div>
+
+  <div class="must-not">interp走SSM → 不动点。interp输入含ΔS_obj → 有效信号被零值淹没。多输出共享网络 → 梯度绑架。interp监督target二值化 → 训练信号太弱。</div>
+</div>
+
+<!-- ═══════════════ EMBEDDER ═══════════════ -->
+<div id="panel-embedder" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-kept-dim)">◻</div>
+    <div>
+      <div class="detail-title">多模态嵌入层</div>
+      <div class="detail-meta">
+        <span class="tag-kept" style="padding:2px 8px;border-radius:3px">保留原设计</span>
+        <span>编码阶段执行一次</span>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">功能</div>
+    <div class="section-body">
+      <p>将不同模态的原始输入映射到同一状态空间。训练目标是使配对的多模态输入在状态空间中占据相近位置（对比学习 + 循环一致性）。</p>
+      <div class="tag-list">
+        <span class="tag">E_vision: image → ℝ^D</span>
+        <span class="tag">E_audio: audio → ℝ^D</span>
+        <span class="tag">E_text: text → ℝ^D</span>
+        <span class="tag">E_action: action → ℝ^D</span>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">v3 的变化</div>
+    <div class="section-body">
+      <p>嵌入结果现在同时进入 C₋₁（目标层）和因果图层 G。嵌入向量 h 同时作为跳跃连接直通输出——这是新增的, 原始架构没有跳跃连接。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ CONCEPT ═══════════════ -->
+<div id="panel-concept" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-kept-dim)">⋮</div>
+    <div>
+      <div class="detail-title">层次概念空间</div>
+      <div class="detail-meta">
+        <span class="tag-kept" style="padding:2px 8px;border-radius:3px">保留</span>
+        <span class="tag-fix" style="padding:2px 8px;border-radius:3px; margin-left:4px">+层间跳跃</span>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">层次结构</div>
+    <div class="section-body">
+      <div class="props">
+        <div class="prop">
+          <div class="prop-key">C₀ 抽象概念层</div>
+          <div class="prop-val">d = 64</div>
+          <div class="node-sub" style="margin-top:6px">意图、主题、情感基调、目标。受C₋₁调制。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">C₁ 中层概念层</div>
+          <div class="prop-val">d = 256</div>
+          <div class="node-sub" style="margin-top:6px">实体、关系、事件框架、概念原语(K≈4096)。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">C₂ 具体语义层</div>
+          <div class="prop-val">d = 512</div>
+          <div class="node-sub" style="margin-top:6px">语义属性、修饰、时态、语用特征。</div>
+        </div>
+        <div class="prop">
+          <div class="prop-key">C₃ 实例化层</div>
+          <div class="prop-val">d = 1024</div>
+          <div class="node-sub" style="margin-top:6px">可直接投影为词序列。内部奖励从此层读取。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">v3 关键新增: 层间跳跃连接</div>
+    <div class="section-body">
+      <p>原始C₀→C₁→C₂→C₃严格串联, 任何一层失败, 下游全部无信号。优化后每层都有到输出的独立跳跃路径:</p>
+      <div class="code-block">output = W₀·C₀ + W₁·C₁ + W₂·C₂ + W₃·C₃
+// 不再依赖串联, 任何层级的抽象都能直接参与决策
+// 类似 Feature Pyramid Network 的多尺度特征汇聚</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SLOT ═══════════════ -->
+<div id="panel-slot" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-kept-dim)">▪</div>
+    <div>
+      <div class="detail-title">槽位工作记忆</div>
+      <div class="detail-meta">
+        <span class="tag-kept" style="padding:2px 8px;border-radius:3px">保留原设计</span>
+        <span>4槽位 × 64维</span>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">读/写机制</div>
+    <div class="section-body">
+      <div class="code-block"># 读: 注意力加权
+attn = softmax(slots @ query / √d)      // (4,)
+read = Σ(attn_i × slot_i)
+
+# 写: 软门控, 慢更新
+write_weights = softmax(Linear(query))   // (4,)
+slots += write_weights × (query - slots) × 0.3
+
+# 初始化: 可学习 empty_token
+slots_0 = empty_token.expand(n_slots).clone()</div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">当前状态</div>
+    <div class="section-body">
+      <p>在80步短episode中难单独评估。跳跃连接确保了即使槽位记忆全失败, 信息仍通过h直通输出。长序列任务(500步多房间)中应发挥关键作用——需要跨房间记住钥匙位置时, 工作记忆从"没拖后腿"变为"不可或缺"。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ OUTPUT ═══════════════ -->
+<div id="panel-output" class="panel">
+  <div class="detail-header">
+    <div class="detail-icon" style="background:var(--acc-kept-dim)">→</div>
+    <div>
+      <div class="detail-title">输出投影层</div>
+      <div class="detail-meta">
+        <span class="tag-kept" style="padding:2px 8px;border-radius:3px">保留原设计</span>
+        <span>按需执行</span>
+      </div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">直接状态投影</div>
+    <div class="section-body">
+      <div class="code-block">文本输出:  C₃ → Linear(d=1024, vocab_size) → 词概率分布
+图像输出:  C₂ → 扩散模型去噪 → 像素空间
+动作输出:  C₀ → 策略网络头 → 动作指令
+状态传输:  S_obj 直接序列化 → AI间通信(无需语言)
+
+// v3新增: 跳跃汇聚
+动作输出:  c2 = Linear(S_obj, slot_read, h) → ActionHead(π, V)
+// h跳跃连接确保即使上层全失败, 基础动作能力不丧失</div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head">设计哲学</div>
+    <div class="section-body">
+      <p>状态空间已包含所有必要信息。输出只是换基底——从状态基底变换到词表/像素/动作基底。没有独立的"语言模型", 语言能力是状态空间的涌现属性。</p>
+    </div>
+  </div>
+</div>
+
+</main>
+</div>
+
+<script>
+const panelMap = {
+  'overview':0, 'training':1, 'rules':2,
+  'gatedssm':3, 'scene':4, 'skip':5, 'lora-delta-a':6,
+  'c-1':7, 'causal':8, 'meta':9, 'reward':10, 'interp':11,
+  'embedder':12, 'concept':13, 'slot':14, 'output':15
+};
+const classMap = {
+  'overview':'fix', 'training':'fix', 'rules':'fix',
+  'gatedssm':'fix', 'scene':'fix', 'skip':'fix', 'lora-delta-a':'lora',
+  'c-1':'new', 'causal':'new', 'meta':'new', 'reward':'new', 'interp':'new',
+  'embedder':'kept', 'concept':'kept', 'slot':'kept', 'output':'kept'
+};
+
+function nav(el, panelId) {
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  el.classList.add('active');
+  showPanel(panelId);
+}
+
+function go(panelId) {
+  const navItems = document.querySelectorAll('.nav-item');
+  navItems.forEach(n => n.classList.remove('active'));
+  const idx = panelMap[panelId];
+  if (navItems[idx]) {
+    navItems[idx].classList.add('active');
+  }
+  showPanel(panelId);
+}
+
+function showPanel(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  const el = document.getElementById('panel-' + id);
+  if (el) el.classList.add('active');
+}
+</script>
+</body>
+</html>
