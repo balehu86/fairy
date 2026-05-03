@@ -1,4 +1,4 @@
-# evaluate.py — v3.1
+# evaluate.py — 修: agent.to(DEVICE) + phase=3 + ΔA测试输出
 
 import torch
 import numpy as np
@@ -7,11 +7,16 @@ from csm_agent import CSMv3Agent
 from device_utils import DEVICE
 
 
-def counterfactual_test():
-    agent = CSMv3Agent()
+def _load_agent():
+    agent = CSMv3Agent().to(DEVICE)
     agent.load_state_dict(torch.load('results/csm_v3_1_model.pt', weights_only=True, map_location=DEVICE))
     agent.eval()
-    
+    agent.phase = 3  # 评估时强制P3以激活ΔA和概念池低门槛
+    return agent
+
+
+def counterfactual_test():
+    agent = _load_agent()
     env = CausalGridWorld(seed=123)
     obs, gt = env.reset()
     agent.reset_hidden()
@@ -40,7 +45,6 @@ def counterfactual_test():
     ae = agent.causal_graph.action_effects.detach().cpu().numpy()
     actions = ['up', 'down', 'left', 'right', 'pickup', 'use']
     labels = ['has_key', 'door_open', 'near_treas', 'saw_deco']
-    
     print(f"\n动作直接效果:")
     print(f"{'':>10}" + "".join(f"{l:>12}" for l in labels))
     for i, a in enumerate(actions):
@@ -54,15 +58,12 @@ def counterfactual_test():
 
 
 def interpretability_demo():
-    agent = CSMv3Agent()
-    agent.load_state_dict(torch.load('results/csm_v3_1_model.pt', weights_only=True, map_location=DEVICE))
-    agent.eval()
-    
+    agent = _load_agent()
     env = CausalGridWorld(seed=999)
     obs, gt = env.reset()
     agent.reset_hidden()
     
-    print("=== 元认知可解释信号 (v3.1 BCE独立头) ===")
+    print("=== 元认知可解释信号 (单调循环头) ===")
     print(f"{'Step':>5} {'Act':>4} {'R':>6} {'Repeat':>7} "
           f"{'循环':>6} {'置信':>6} {'探索':>6} {'利用':>6} {'ΔA':>8} {'Pool':>4}")
     
@@ -75,7 +76,6 @@ def interpretability_demo():
         interp = out['interp'].cpu().numpy()
         da = out['delta_A_mag']
         ps = out['pool_size']
-        
         obs, r, done, gt = env.step(action)
         
         print(f"{step:>5} {action:>4} {r:>6.2f} {agent.action_repeat_count:>7.0f} "
@@ -86,37 +86,56 @@ def interpretability_demo():
 
 
 def pool_growth_demo():
-    """展示概念池如何随交互增长"""
-    agent = CSMv3Agent()
-    agent.load_state_dict(torch.load('results/csm_v3_1_model.pt', weights_only=True, map_location=DEVICE))
-    agent.eval()
-    
+    agent = _load_agent()
     env = CausalGridWorld(seed=42)
     obs, gt = env.reset()
     agent.reset_hidden()
     
     print("=== 概念池增长轨迹 ===")
-    print(f"{'Step':>5} {'Act':>4} {'Pool':>4} {'新条目':>6} {'场景':>4}")
-    
+    print(f"{'Step':>5} {'Act':>4} {'Pool':>4} {'新增':>6} {'场景':>4}")
     prev_size = agent.concept_pool_data.shape[0]
+    
     for step in range(40):
         with torch.no_grad():
             out = agent(obs, ext_reward=0.0, action_taken=agent.last_action if step > 0 else None)
         action = out['action_probs'].argmax().item()
         agent.set_prev_action(action)
-        
         new_size = out['pool_size']
         added = "追加" if new_size > prev_size else ""
         prev_size = new_size
-        
         obs, r, done, gt = env.step(action)
-        
-        # 简单场景描述
         has_key = "🔑" if gt[0] > 0.5 else "·"
         door = "🚪" if gt[1] > 0.5 else "·"
-        
         print(f"{step:>5} {action:>4} {new_size:>4} {added:>6} {has_key}{door}")
         if done: break
+
+
+def delta_a_test():
+    agent = _load_agent()
+    env = CausalGridWorld(seed=42)
+    obs, gt = env.reset()
+    agent.reset_hidden()
+    
+    print("=== ΔA 幅度与影响 ===")
+    print(f"{'Step':>5} {'Act':>4} {'R':>6} {'Repeat':>7} {'ΔA_mag':>8} {'Δr':>8}")
+    
+    for step in range(40):
+        with torch.no_grad():
+            out = agent(obs, ext_reward=0.0, action_taken=agent.last_action if step > 0 else None)
+            action = out['action_probs'].argmax().item()
+            agent.set_prev_action(action)
+            
+            r_diff = 0.0
+            if agent.prev_h is not None and agent.last_delta_A is not None:
+                combined = torch.cat([out['h'], agent.S_obj], dim=-1)
+                r_base = torch.sigmoid(agent.obj_ssm.W_r(combined))
+                r_mod = torch.clamp(r_base + agent.last_delta_A * 0.3, 0, 1)
+                r_diff = (r_mod - r_base).abs().mean().item()
+            
+            da = out['delta_A_mag']
+            obs, r, done, gt = env.step(action)
+            print(f"{step:>5} {action:>4} {r:>6.2f} {agent.action_repeat_count:>7.0f} {da:>8.4f} {r_diff:>8.4f}")
+            if done: break
 
 
 if __name__ == '__main__':
@@ -125,3 +144,4 @@ if __name__ == '__main__':
     if cmd == 'cf': counterfactual_test()
     elif cmd == 'interp': interpretability_demo()
     elif cmd == 'pool': pool_growth_demo()
+    elif cmd == 'da': delta_a_test()

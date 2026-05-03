@@ -1,9 +1,8 @@
-# modules.py — v3.1
+# modules.py — 只改 MetaCognition
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 class Encoder(nn.Module):
     def __init__(self, obs_dim=56, hidden=64):
@@ -11,7 +10,6 @@ class Encoder(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(obs_dim, hidden), nn.GELU(), nn.Linear(hidden, hidden))
     def forward(self, x): return self.net(x)
-
 
 class MetaGoalLayer(nn.Module):
     def __init__(self, input_dim=64, goal_dim=8):
@@ -21,7 +19,6 @@ class MetaGoalLayer(nn.Module):
         signals = torch.tensor([curiosity, capability_gap, ext_reward],
                                dtype=torch.float32, device=h.device)
         return torch.tanh(self.priority_head(torch.cat([h, signals])))
-
 
 class SparseSceneRouter(nn.Module):
     def __init__(self, input_dim=64, n_scenes=16):
@@ -38,7 +35,6 @@ class SparseSceneRouter(nn.Module):
         alpha = torch.sigmoid(self.gate(torch.cat([h, goal]))).squeeze()
         return h + alpha * enhancement, weights
 
-
 class LowRankDeltaA(nn.Module):
     def __init__(self, meta_dim=16, state_dim=32, rank=4):
         super().__init__()
@@ -47,12 +43,10 @@ class LowRankDeltaA(nn.Module):
         self.norm_gate = nn.Linear(meta_dim, 1)
         nn.init.normal_(self.up.weight, 0, 0.01)
         nn.init.zeros_(self.up.bias)
-    
     def forward(self, S_meta):
         delta = self.up(F.relu(self.down(S_meta)))
         scale = torch.sigmoid(self.norm_gate(S_meta))
         return delta * scale
-
 
 class GatedSSM(nn.Module):
     def __init__(self, input_dim, state_dim):
@@ -61,7 +55,6 @@ class GatedSSM(nn.Module):
         self.W_r = nn.Linear(input_dim + state_dim, state_dim)
         self.W_h = nn.Linear(input_dim + state_dim, state_dim)
         self.output_proj = nn.Linear(state_dim, input_dim)
-    
     def forward(self, x, S, delta_A=None):
         combined = torch.cat([x, S], dim=-1)
         z = torch.sigmoid(self.W_z(combined))
@@ -74,24 +67,20 @@ class GatedSSM(nn.Module):
             S_new = S_new + delta_A * 0.1
         return self.output_proj(S_new), S_new
 
-
 class MetaCognition(nn.Module):
-    """v3.1: 改回confidence输入(非ext_reward), LowRankDeltaA, 独立interp头"""
     def __init__(self, obj_state_dim=32, meta_state_dim=16, delta_rank=4):
         super().__init__()
-        # trace: ΔS_obj(32) + repeat(1) + pred_err(1) + confidence(1) + entropy(1) = 36
         self.trace_encoder = nn.Linear(obj_state_dim + 1 + 3, meta_state_dim)
         self.meta_ssm = GatedSSM(meta_state_dim, meta_state_dim)
         self.low_rank_delta_a = LowRankDeltaA(meta_state_dim, obj_state_dim, delta_rank)
-        # 独立循环头 — BCE训练
-        self.loop_head = nn.Sequential(
-            nn.Linear(1, 8), nn.ReLU(),
-            nn.Linear(8, 1))
-        # 共享头 — 置信/探索/利用
+        # 单调循环头: abs(scale)保证权重为正→repeat越大logit越高
+        self.loop_scale = nn.Parameter(torch.tensor(2.0))
+        self.loop_bias = nn.Parameter(torch.tensor(-2.0))
+        # 共享头
         self.interp_shared = nn.Sequential(
             nn.Linear(3, 16), nn.ReLU(),
             nn.Linear(16, 3), nn.Sigmoid())
-    
+
     def forward(self, delta_S_obj, action_repeat, pred_err, confidence, entropy, S_meta):
         dev = delta_S_obj.device
         trace = torch.cat([delta_S_obj,
@@ -100,15 +89,12 @@ class MetaCognition(nn.Module):
         x = self.trace_encoder(trace)
         _, S_meta_new = self.meta_ssm(x, S_meta)
         delta_A = self.low_rank_delta_a(S_meta_new)
-        
-        # 独立循环头: 原始sigmoid输出, BCE外部加
-        loop_logit = self.loop_head(torch.tensor([action_repeat], device=dev))
+        # 单调循环: scale被abs()约束为正, bias可偏移
+        loop_logit = torch.abs(self.loop_scale) * action_repeat + self.loop_bias
         loop = torch.sigmoid(loop_logit)
         shared = self.interp_shared(torch.tensor([pred_err, confidence, entropy], device=dev))
         interp = torch.cat([loop, shared], dim=-1)
-        
-        return delta_A, S_meta_new, interp, loop_logit.squeeze()
-
+        return delta_A, S_meta_new, interp, loop_logit
 
 class SlotMemory(nn.Module):
     def __init__(self, slot_dim=64, n_slots=4):
@@ -128,7 +114,6 @@ class SlotMemory(nn.Module):
         new_slots = slots + write_weights.unsqueeze(-1) * (query - slots) * 0.3
         return read, new_slots
 
-
 class CausalGraph(nn.Module):
     def __init__(self, n_vars=4, n_actions=6, state_dim=64):
         super().__init__()
@@ -142,19 +127,15 @@ class CausalGraph(nn.Module):
             self.var_causal_logits[3, 0] = -2.0
             self.var_causal_logits[3, 1] = -2.0
             self.var_causal_logits[3, 2] = -2.0
-    
     def detect_vars(self, h):
         return torch.sigmoid(self.var_detector(h))
-    
     def get_var_adj(self):
         return torch.sigmoid(self.var_causal_logits) * (1 - torch.eye(self.n_vars, device=self.var_causal_logits.device))
-    
     def predict_delta(self, var_probs, action_oh):
         direct = action_oh @ self.action_effects
         adj = self.get_var_adj()
         mediated = direct @ adj
         return torch.tanh(direct + mediated)
-    
     def counterfactual(self, var_probs, intervene_idx, intervene_val):
         modified = var_probs.clone()
         modified[intervene_idx] = intervene_val
@@ -163,10 +144,8 @@ class CausalGraph(nn.Module):
         delta = modified - var_probs
         propagated = delta @ adj
         return torch.clamp(var_probs + propagated, 0, 1)
-    
     def sparsity_loss(self):
         return (self.get_var_adj() + 1e-8).sqrt().sum()
-    
     def event_supervision_loss(self, action_idx, var_deltas):
         action_oh = torch.zeros(self.n_actions, device=self.action_effects.device)
         action_oh[action_idx] = 1.0
@@ -177,7 +156,6 @@ class CausalGraph(nn.Module):
         target = var_deltas * changed
         mask = changed + 0.1
         return (F.mse_loss(predicted_effect, target, reduction='none') * mask).mean()
-    
     def var_causal_supervision_loss(self, gt_deltas):
         changed = (gt_deltas.abs() > 0.05).float()
         if changed.sum() == 0:
@@ -185,9 +163,7 @@ class CausalGraph(nn.Module):
         adj = self.get_var_adj()
         co_occurred = (changed.unsqueeze(0) * changed.unsqueeze(1))
         target = co_occurred * (1 - torch.eye(self.n_vars, device=adj.device))
-        loss = F.binary_cross_entropy(adj, target.detach())
-        return loss
-
+        return F.binary_cross_entropy(adj, target.detach())
 
 class ActionHead(nn.Module):
     def __init__(self, input_dim, n_actions=6):

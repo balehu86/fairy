@@ -1,4 +1,4 @@
-# train.py — v3.1
+# train.py — 修GPU bug + loop BCE加权
 
 import torch
 import torch.optim as optim
@@ -99,7 +99,6 @@ def update_agent(agent, optimizer, transitions,
     
     loss = policy_loss + value_coef * value_loss - entropy_coef * entropy_bonus + entropy_pen
     
-    # 辅助损失
     total_aux = torch.tensor(0.0, device=DEVICE)
     aux_count = 0
     for t in transitions:
@@ -110,7 +109,7 @@ def update_agent(agent, optimizer, transitions,
     if aux_count > 0:
         loss = loss + aux_coef * total_aux / max(1, aux_count)
     
-    # interp共享头: MSE (置信/探索/利用, 3个信号)
+    # interp共享头
     shared_targets = []
     shared_outputs = []
     for i in range(1, len(transitions)):
@@ -121,27 +120,30 @@ def update_agent(agent, optimizer, transitions,
         expl = min(pe * 3, 1.0)
         explt = min(max(r, 0.0), 1.0)
         shared_targets.append([conf, expl, explt])
-        shared_outputs.append(t['interp'][1:])  # index 1,2,3
-    
+        shared_outputs.append(t['interp'][1:])
     if shared_outputs:
         shared_targets_t = torch.tensor(shared_targets, dtype=torch.float32, device=DEVICE)
         shared_outputs_t = torch.stack(shared_outputs)
         loss = loss + interp_coef * F.mse_loss(shared_outputs_t, shared_targets_t)
     
-    # 循环头: BCE (独立损失, 更强梯度)
+    # 循环头BCE: 高repeat样本加权3x
     loop_logits = []
     loop_targets = []
+    loop_weights = []
     for i in range(1, len(transitions)):
         t = transitions[i]
         repeat = t['action_repeat']
         target = min(repeat / 10.0, 1.0)
         loop_logits.append(t['loop_logit'])
         loop_targets.append(target)
+        loop_weights.append(1.0 + 2.0 * target)  # repeat高→权重3x
     
     if loop_logits:
         logits_t = torch.stack(loop_logits)
         targets_t = torch.tensor(loop_targets, dtype=torch.float32, device=DEVICE)
-        loss = loss + loop_bce_coef * F.binary_cross_entropy_with_logits(logits_t, targets_t)
+        weights_t = torch.tensor(loop_weights, dtype=torch.float32, device=DEVICE)
+        per_sample = F.binary_cross_entropy_with_logits(logits_t, targets_t, reduction='none')
+        loss = loss + loop_bce_coef * (per_sample * weights_t).mean()
     
     optimizer.zero_grad()
     loss.backward()
@@ -163,9 +165,8 @@ def train(n_episodes=3000, seed=42):
         torch.cuda.manual_seed(seed)
     
     envs = [CausalGridWorld(seed=seed+i) for i in range(5)]
-    agent = CSMv3Agent()
+    agent = CSMv3Agent().to(DEVICE)  # ← 修GPU bug: 必须to(DEVICE)
     
-    # v3.1: LowRankDeltaA单独3e-4学习率
     optimizer = optim.Adam([
         {'params': agent.encoder.parameters(),         'lr': 3e-4},
         {'params': agent.obj_ssm.parameters(),         'lr': 3e-4},
@@ -178,10 +179,11 @@ def train(n_episodes=3000, seed=42):
         {'params': agent.causal_graph.var_detector.parameters(), 'lr': 1e-4},
         {'params': agent.causal_graph.action_effects,  'lr': 3e-4},
         {'params': agent.causal_graph.var_causal_logits,'lr': 3e-4},
-        {'params': agent.meta_cog.low_rank_delta_a.parameters(), 'lr': 3e-4},  # 独立高学习率!
+        {'params': agent.meta_cog.low_rank_delta_a.parameters(), 'lr': 3e-4},
         {'params': agent.meta_cog.trace_encoder.parameters(),    'lr': 5e-5},
         {'params': agent.meta_cog.meta_ssm.parameters(),         'lr': 5e-5},
-        {'params': agent.meta_cog.loop_head.parameters(),        'lr': 1e-4},
+        {'params': agent.meta_cog.loop_scale,                     'lr': 3e-4},  # 单独参数
+        {'params': agent.meta_cog.loop_bias,                      'lr': 3e-4},
         {'params': agent.meta_cog.interp_shared.parameters(),    'lr': 1e-4},
         {'params': agent.meta_goal.parameters(),        'lr': 5e-5},
     ], eps=1e-5)
@@ -189,7 +191,7 @@ def train(n_episodes=3000, seed=42):
     n_params = sum(p.numel() for p in agent.parameters())
     print(f"[csm v3.1] 参数量: {n_params:,}")
     print(f"[csm v3.1] 设备: {DEVICE}")
-    print(f"[csm v3.1] 改动: GrowableStateSpace + LowRankDeltaA(3e-4lr) + BCE loop + confidence输入恢复")
+    print(f"[csm v3.1] 修: GPU to(DEVICE) + 单调循环头(abs*scale+bias) + BCE加权")
     
     rewards_log = deque(maxlen=100)
     success_log = deque(maxlen=100)
@@ -242,7 +244,7 @@ def train(n_episodes=3000, seed=42):
         json.dump(history, f, indent=2)
     torch.save(agent.state_dict(), 'results/csm_v3_1_model.pt')
     print(f"[csm v3.1] 训练完成, 总耗时: {time.time()-start:.1f}s")
-    print(f"[csm v3.1] 最终概念池大小: {agent.concept_pool_data.shape[0]} 条目")
+    print(f"[csm v3.1] 最终概念池: {agent.concept_pool_data.shape[0]} 条目")
     return history
 
 
