@@ -1,4 +1,4 @@
-# train.py — v3 实证优化版
+# train.py — v3.1
 
 import torch
 import torch.optim as optim
@@ -56,6 +56,8 @@ def collect_episode(agent, env, max_steps=80):
             'pred_err': out['pred_err'], 'is_event': is_event,
             'action_repeat': agent.action_repeat_count,
             'delta_A_mag': out['delta_A_mag'],
+            'pool_size': out['pool_size'],
+            'loop_logit': out['loop_logit'],
         })
         
         total_reward += reward
@@ -77,7 +79,8 @@ def compute_returns(transitions, gamma=0.99):
 
 
 def update_agent(agent, optimizer, transitions,
-                 entropy_coef=0.03, value_coef=0.5, aux_coef=0.3, interp_coef=0.3):
+                 entropy_coef=0.03, value_coef=0.5, aux_coef=0.3,
+                 interp_coef=0.3, loop_bce_coef=1.0):
     returns = compute_returns(transitions)
     returns_t = torch.tensor(returns, dtype=torch.float32, device=DEVICE)
     if len(returns_t) > 1:
@@ -96,6 +99,7 @@ def update_agent(agent, optimizer, transitions,
     
     loss = policy_loss + value_coef * value_loss - entropy_coef * entropy_bonus + entropy_pen
     
+    # 辅助损失
     total_aux = torch.tensor(0.0, device=DEVICE)
     aux_count = 0
     for t in transitions:
@@ -106,28 +110,38 @@ def update_agent(agent, optimizer, transitions,
     if aux_count > 0:
         loss = loss + aux_coef * total_aux / max(1, aux_count)
     
-    # interp 监督: 独立头 — loop_head 和 interp_shared 梯度自然分离
-    interp_targets = []
-    interp_outputs = []
+    # interp共享头: MSE (置信/探索/利用, 3个信号)
+    shared_targets = []
+    shared_outputs = []
     for i in range(1, len(transitions)):
         t = transitions[i]
         pe = t['pred_err']
         r = t['reward']
-        repeat = t['action_repeat']
-        
-        loop = min(repeat / 10.0, 1.0)
         conf = 1.0 - min(pe, 1.0)
         expl = min(pe * 3, 1.0)
         explt = min(max(r, 0.0), 1.0)
-        
-        interp_targets.append([loop, conf, expl, explt])
-        interp_outputs.append(t['interp'])
+        shared_targets.append([conf, expl, explt])
+        shared_outputs.append(t['interp'][1:])  # index 1,2,3
     
-    if interp_outputs:
-        targets_t = torch.tensor(interp_targets, dtype=torch.float32, device=DEVICE)
-        outputs_t = torch.stack(interp_outputs)
-        interp_loss = F.mse_loss(outputs_t, targets_t)
-        loss = loss + interp_coef * interp_loss
+    if shared_outputs:
+        shared_targets_t = torch.tensor(shared_targets, dtype=torch.float32, device=DEVICE)
+        shared_outputs_t = torch.stack(shared_outputs)
+        loss = loss + interp_coef * F.mse_loss(shared_outputs_t, shared_targets_t)
+    
+    # 循环头: BCE (独立损失, 更强梯度)
+    loop_logits = []
+    loop_targets = []
+    for i in range(1, len(transitions)):
+        t = transitions[i]
+        repeat = t['action_repeat']
+        target = min(repeat / 10.0, 1.0)
+        loop_logits.append(t['loop_logit'])
+        loop_targets.append(target)
+    
+    if loop_logits:
+        logits_t = torch.stack(loop_logits)
+        targets_t = torch.tensor(loop_targets, dtype=torch.float32, device=DEVICE)
+        loss = loss + loop_bce_coef * F.binary_cross_entropy_with_logits(logits_t, targets_t)
     
     optimizer.zero_grad()
     loss.backward()
@@ -151,6 +165,7 @@ def train(n_episodes=3000, seed=42):
     envs = [CausalGridWorld(seed=seed+i) for i in range(5)]
     agent = CSMv3Agent()
     
+    # v3.1: LowRankDeltaA单独3e-4学习率
     optimizer = optim.Adam([
         {'params': agent.encoder.parameters(),         'lr': 3e-4},
         {'params': agent.obj_ssm.parameters(),         'lr': 3e-4},
@@ -159,21 +174,27 @@ def train(n_episodes=3000, seed=42):
         {'params': agent.slot_mem.parameters(),        'lr': 3e-4},
         {'params': agent.world_model.parameters(),     'lr': 3e-4},
         {'params': agent.scene_router.parameters(),    'lr': 1e-4},
+        {'params': agent.concept_pool.parameters(),    'lr': 1e-4},
         {'params': agent.causal_graph.var_detector.parameters(), 'lr': 1e-4},
         {'params': agent.causal_graph.action_effects,  'lr': 3e-4},
         {'params': agent.causal_graph.var_causal_logits,'lr': 3e-4},
-        {'params': agent.meta_cog.parameters(),         'lr': 5e-5},
+        {'params': agent.meta_cog.low_rank_delta_a.parameters(), 'lr': 3e-4},  # 独立高学习率!
+        {'params': agent.meta_cog.trace_encoder.parameters(),    'lr': 5e-5},
+        {'params': agent.meta_cog.meta_ssm.parameters(),         'lr': 5e-5},
+        {'params': agent.meta_cog.loop_head.parameters(),        'lr': 1e-4},
+        {'params': agent.meta_cog.interp_shared.parameters(),    'lr': 1e-4},
         {'params': agent.meta_goal.parameters(),        'lr': 5e-5},
     ], eps=1e-5)
     
     n_params = sum(p.numel() for p in agent.parameters())
-    print(f"[csm v3] 参数量: {n_params:,}")
-    print(f"[csm v3] 设备: {DEVICE}")
-    print(f"[csm v3] 改动: LowRankDeltaA(秩4) + 独立interp头 + GatedSSM增强调制(0.3+状态扰动)")
+    print(f"[csm v3.1] 参数量: {n_params:,}")
+    print(f"[csm v3.1] 设备: {DEVICE}")
+    print(f"[csm v3.1] 改动: GrowableStateSpace + LowRankDeltaA(3e-4lr) + BCE loop + confidence输入恢复")
     
     rewards_log = deque(maxlen=100)
     success_log = deque(maxlen=100)
-    history = {'episode': [], 'avg_reward': [], 'success_rate': [], 'phase': [], 'delta_A_mag': []}
+    history = {'episode': [], 'avg_reward': [], 'success_rate': [],
+               'phase': [], 'delta_A_mag': [], 'pool_size': []}
     
     start = time.time()
     metrics = {'policy': 0, 'value': 0, 'entropy': 0}
@@ -192,31 +213,36 @@ def train(n_episodes=3000, seed=42):
         rewards_log.append(total_r)
         success_log.append(1.0 if total_r > 0.5 else 0.0)
         
-        # ΔA 幅度追踪
         da_mags = [t['delta_A_mag'] for t in traj if t['delta_A_mag'] > 0]
         avg_da = np.mean(da_mags) if da_mags else 0.0
+        pool_sizes = [t['pool_size'] for t in traj]
+        avg_pool = np.mean(pool_sizes) if pool_sizes else 0
+        max_pool = max(pool_sizes) if pool_sizes else 0
         
         if (ep+1) % 100 == 0:
             avg_r = np.mean(rewards_log)
             succ = np.mean(success_log)
             elapsed = time.time() - start
             vram = f"{torch.cuda.memory_allocated()/1024**2:.0f}MB" if torch.cuda.is_available() else "N/A"
-            da_info = f" | ΔA: {avg_da:.4f}" if agent.phase >= 3 else ""
-            print(f"[csm v3] Ep {ep+1}/{n_episodes} P{agent.phase} | "
+            extra = f" | Pool: {avg_pool:.0f}/{max_pool}"
+            if agent.phase >= 3: extra += f" | ΔA: {avg_da:.4f}"
+            print(f"[csm v3.1] Ep {ep+1}/{n_episodes} P{agent.phase} | "
                   f"AvgR: {avg_r:.3f} | Succ: {succ:.2%} | "
-                  f"Ent: {metrics['entropy']:.3f}{da_info} | "
+                  f"Ent: {metrics['entropy']:.3f}{extra} | "
                   f"VRAM: {vram} | Time: {elapsed:.1f}s")
             history['episode'].append(ep+1)
             history['avg_reward'].append(float(avg_r))
             history['success_rate'].append(float(succ))
             history['phase'].append(agent.phase)
             history['delta_A_mag'].append(float(avg_da))
+            history['pool_size'].append(float(avg_pool))
     
     os.makedirs('results', exist_ok=True)
-    with open('results/csm_v3_history.json', 'w') as f:
+    with open('results/csm_v3_1_history.json', 'w') as f:
         json.dump(history, f, indent=2)
-    torch.save(agent.state_dict(), 'results/csm_v3_model.pt')
-    print(f"[csm v3] 训练完成, 总耗时: {time.time()-start:.1f}s")
+    torch.save(agent.state_dict(), 'results/csm_v3_1_model.pt')
+    print(f"[csm v3.1] 训练完成, 总耗时: {time.time()-start:.1f}s")
+    print(f"[csm v3.1] 最终概念池大小: {agent.concept_pool_data.shape[0]} 条目")
     return history
 
 

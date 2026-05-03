@@ -1,4 +1,4 @@
-# csm_agent.py — v3 实证优化版
+# csm_agent.py — v3.1
 
 import torch
 import torch.nn as nn
@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 from collections import deque
 from modules import *
+from growable_state import GrowableStateSpace
 from device_utils import DEVICE
 
 
@@ -20,11 +21,13 @@ class CSMv3Agent(nn.Module):
         self.meta_goal = MetaGoalLayer(H, goal_dim=8)
         self.scene_router = SparseSceneRouter(H, n_scenes=16)
         self.obj_ssm = GatedSSM(H, state_dim=32)
+        self.concept_pool = GrowableStateSpace(vec_dim=32, query_dim=H, max_init=4)
         self.meta_cog = MetaCognition(obj_state_dim=32, meta_state_dim=16, delta_rank=4)
         self.slot_mem = SlotMemory(slot_dim=H, n_slots=4)
         self.causal_graph = CausalGraph(n_vars=4, n_actions=n_actions, state_dim=H)
         
-        self.c2_proj = nn.Linear(32 + 64 + 64, 64)
+        # S_obj(32) + concept_read(32) + slot_read(64) + h(64) = 192
+        self.c2_proj = nn.Linear(32 + 32 + 64 + 64, 64)
         self.action_head = ActionHead(64, n_actions)
         self.world_model = nn.Linear(H + n_actions, H)
         
@@ -41,6 +44,7 @@ class CSMv3Agent(nn.Module):
         self.S_obj = torch.zeros(32, device=self.device)
         self.prev_S_obj = torch.zeros(32, device=self.device)
         self.S_meta = torch.zeros(16, device=self.device)
+        self.concept_pool_data = self.concept_pool.init_pool(self.device)
         self.slots = self.slot_mem.init_slots().to(self.device)
         self.prev_h = None
         self.prev_action_oh = None
@@ -81,10 +85,17 @@ class CSMv3Agent(nn.Module):
         
         h_enhanced, scene_weights = self.scene_router(h, goal)
         
+        # 概念池: 读取 → 写入
+        concept_read = self.concept_pool.read(h_enhanced, self.concept_pool_data)
+        threshold = 0.3 if self.phase >= 2 else 0.5
+        self.concept_pool_data = self.concept_pool.write(h_enhanced, self.concept_pool_data, threshold)
+        
         delta_S_obj = self.S_obj - self.prev_S_obj
+        confidence = 1.0 - min(pred_err, 1.0)
         entropy_val = -(scene_weights * torch.log(scene_weights + 1e-8)).sum().item()
-        delta_A, self.S_meta, interp = self.meta_cog(
-            delta_S_obj.detach(), normed_repeat, pred_err, entropy_val, ext_reward, self.S_meta
+        # v3.1: 改回confidence, 不用ext_reward
+        delta_A, self.S_meta, interp, loop_logit = self.meta_cog(
+            delta_S_obj.detach(), normed_repeat, pred_err, confidence, entropy_val, self.S_meta
         )
         if self.phase < 3:
             delta_A = delta_A * 0
@@ -92,7 +103,7 @@ class CSMv3Agent(nn.Module):
         
         y_ssm, self.S_obj = self.obj_ssm(h_enhanced, self.S_obj, delta_A)
         slot_read, self.slots = self.slot_mem(h_enhanced, self.slots)
-        c2 = self.c2_proj(torch.cat([self.S_obj, slot_read, h]))
+        c2 = self.c2_proj(torch.cat([self.S_obj, concept_read, slot_read, h]))
         
         var_probs = self.causal_graph.detect_vars(h)
         if self.phase < 2: var_probs = var_probs.detach()
@@ -107,6 +118,8 @@ class CSMv3Agent(nn.Module):
             'interp': interp, 'var_probs': var_probs,
             'curiosity': curiosity, 'pred_err': pred_err, 'h': h,
             'delta_A_mag': delta_A.detach().abs().mean().item() if self.phase >= 3 else 0.0,
+            'pool_size': self.concept_pool_data.shape[0],
+            'loop_logit': loop_logit,
         }
     
     def set_prev_action(self, action):
